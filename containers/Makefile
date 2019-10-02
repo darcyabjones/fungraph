@@ -26,6 +26,10 @@ SEQWISH_PREFIX_ARG=$(INSTALL_BASE)/seqwish/$(SEQWISH_COMMIT)
 FPA_VERSION=0.5.0
 FPA_PREFIX_ARG=$(INSTALL_BASE)/fpa/$(FPA_VERSION)
 
+VG_VERSION=v1.19.0
+VG_URL=https://github.com/vgteam/vg/releases/download/v1.19.0/vg-v1.19.0.tar.gz
+VG_PREFIX_ARG=$(INSTALL_BASE)/vg/$(VG_VERSION)
+
 
 GENERAL=base minimap2 seqwish fpa
 
@@ -128,6 +132,19 @@ docker/fpa: fpa.Dockerfile docker/base
 	  --build-arg IMAGE="$(BASE_IMAGE)" \
 	  --build-arg FPA_VERSION="$(FPA_VERSION)" \
 	  --build-arg FPA_PREFIX_ARG="$(FPA_PREFIX_ARG)" \
+	  --file $< \
+	  -t "$(call make_image_name,$@)" \
+	  .
+	@mkdir -p "$(dir $@)"
+	@touch $@
+
+
+docker/vg: vg.Dockerfile docker/base
+	docker build \
+	  --build-arg IMAGE="$(BASE_IMAGE)" \
+	  --build-arg VG_VERSION="$(VG_VERSION)" \
+	  --build-arg VG_URL="$(VG_URL)" \
+	  --build-arg VG_PREFIX_ARG="$(VG_PREFIX_ARG)" \
 	  --file $< \
 	  -t "$(call make_image_name,$@)" \
 	  .
