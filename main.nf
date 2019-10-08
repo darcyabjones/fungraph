@@ -26,6 +26,8 @@ if (params.help) {
 
 params.genomes = false
 
+params.minalign = 10000
+
 
 if ( params.genomes ) {
     Channel
@@ -128,7 +130,7 @@ process filterAlignment {
 
     script:
     """
-    zcat aligned.paf.gz | fpa drop -l 10000 | gzip > filtered.paf.gz
+    zcat aligned.paf.gz | fpa drop -l "${params.minalign}" | gzip > filtered.paf.gz
     """
 }
 
@@ -138,22 +140,65 @@ process squishAlignments {
     label "seqwish"
     label "big_task"
 
+    publishDir "${params.outdir}"
+
     input:
     set file("genomes.fasta.gz"),
         file("alignments.paf.gz") from combinedGenomes4Squish
             .combine(filtered)
 
     output:
-    file "x.gfa"
+    file "pan.gfa" into squishedAlignments
+    file "pan.vgp"
 
     script:
     """
     seqwish \
         -s "genomes.fasta.gz" \
         -p "alignments.paf.gz" \
-        -b x.graph \
-        -o x.vgp \
-        -g x.gfa \
+        -b pan.graph \
+        -o pan.vgp \
+        -g pan.gfa \
         --threads "${task.cpus}"
+    """
+}
+
+
+process gfa2ODGI {
+
+    label "odgi"
+    label "small_task"
+
+    input:
+    file "pan.gfa" from squishedAlignments
+
+    output:
+    file "pan.dg" into odgiGraph
+
+    script:
+    """
+    odgi build -g pan.gfa -o - -p | odgi sort -i - -o pan.dg
+    """
+}
+
+
+/*
+*/
+process visualiseGraph {
+
+    label "odgi"
+    label "medium_task"
+
+    publishDir "${params.outdir}"
+
+    input:
+    file "pan.dg" from odgiGraph
+
+    output:
+    file "pan.png"
+
+    script:
+    """
+    odgi viz --threads "${task.cpus}" -i pan.dg -x 4000 -y 800 -L 0 -A=SN15 --show-strand -X 1 -P 10 -R -o pan.png
     """
 }

@@ -15,4 +15,5 @@ containers/downloads
 containers/rmlib
 containers/tmp
 .nextflow
-run
+results
+trace

@@ -19,15 +19,18 @@ K8_URL=https://github.com/attractivechaos/k8/releases/download/v$(K8_VERSION)/k8
 MINIMAP2_PREFIX_ARG=$(INSTALL_BASE)/minimap2/$(MINIMAP_TAG)
 K8_PREFIX_ARG=$(INSTALL_BASE)/k8/$(K8_VERSION)
 
-SEQWISH_COMMIT=af8354b
+SEQWISH_COMMIT=3e94aa8
 SEQWISH_REPO=https://github.com/ekg/seqwish.git
 SEQWISH_PREFIX_ARG=$(INSTALL_BASE)/seqwish/$(SEQWISH_COMMIT)
 
 FPA_VERSION=0.5.0
 FPA_PREFIX_ARG=$(INSTALL_BASE)/fpa/$(FPA_VERSION)
 
+ODGI_COMMIT=2461e5d
+ODGI_REPO=https://github.com/vgteam/odgi.git
+ODGI_PREFIX_ARG=$(INSTALL_BASE)/odgi/$(ODGI_COMMIT)
 
-GENERAL=base minimap2 seqwish fpa
+GENERAL=base minimap2 seqwish fpa odgi
 
 
 all: docker/all singularity/all
@@ -116,6 +119,19 @@ docker/seqwish: seqwish.Dockerfile docker/base
 	  --build-arg SEQWISH_COMMIT="$(SEQWISH_COMMIT)" \
 	  --build-arg SEQWISH_REPO="$(SEQWISH_REPO)" \
 	  --build-arg SEQWISH_PREFIX_ARG="$(SEQWISH_PREFIX_ARG)" \
+	  --file $< \
+	  -t "$(call make_image_name,$@)" \
+	  .
+	@mkdir -p "$(dir $@)"
+	@touch $@
+
+
+docker/odgi: odgi.Dockerfile docker/base
+	docker build \
+	  --build-arg IMAGE="$(BASE_IMAGE)" \
+	  --build-arg ODGI_COMMIT="$(ODGI_COMMIT)" \
+	  --build-arg ODGI_REPO="$(ODGI_REPO)" \
+	  --build-arg ODGI_PREFIX_ARG="$(ODGI_PREFIX_ARG)" \
 	  --file $< \
 	  -t "$(call make_image_name,$@)" \
 	  .
