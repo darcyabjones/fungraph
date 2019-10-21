@@ -303,7 +303,7 @@ process simplifyVG {
 
 /*
  */
-process getVGGBWT {
+process getVGXG {
 
     label "vg"
     label "big_task"
@@ -315,16 +315,14 @@ process getVGGBWT {
 
     output:
     set file("simplified.vg"),
-        file("simplified.gbwt") into vgWithGBWT
+        file("simplified.xg") into vgWithXG
 
     script:
     """
     mkdir tmp
     TMPDIR="\${PWD}/tmp"
     vg index \
-      -T \
-      -
-      -G simplified.gbwt \
+      -x simplified.xg \
       --temp-dir ./tmp \
       --threads "${task.cpus}" \
       simplified.vg
@@ -333,3 +331,42 @@ process getVGGBWT {
     """
 }
 
+
+process pruneGraph {
+
+    label "vg"
+    label "big_task"
+
+    publishDir "${params.outdir}"
+
+    input:
+    set file("simplified.vg"),
+        file("simplified.xg") from vgWithXG
+
+    output:
+    set file("simplified.vg"),
+        file("simplified.xg"),
+        file("simplified.gcsa") into prunedGraph
+
+    script:
+    """
+    mkdir tmp
+    TMPDIR="\${PWD}/tmp"
+
+    vg mod -M 32 simplified.vg > resimplified.vg
+
+    vg prune \
+      -u resimplified.vg \
+      -m node_mapping \
+      --threads "${task.cpus}" \
+    > pruned.vg
+
+    vg index \
+      -g simplified.gcsa \
+      -f node_mapping \
+      --temp-dir ./tmp \
+      --threads "${task.cpus}" \
+      --progress \
+      pruned.vg
+    """
+}
