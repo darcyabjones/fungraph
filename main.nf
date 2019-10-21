@@ -45,6 +45,9 @@ genomes.set {
 }
 
 
+/*
+ * Add the genome name to the beginning of each sequence.
+ */
 process preprocessGenomes {
 
     label "posix"
@@ -70,6 +73,10 @@ process preprocessGenomes {
 }
 
 
+/*
+ * All genomes need to be in the same file for minimap
+ * all-vs-all alignment.
+ */
 process joinGenomes {
 
     label "posix"
@@ -95,6 +102,13 @@ combinedGenomes.into {
 }
 
 
+/*
+ * Minimap2
+ * url: https://github.com/lh3/minimap2
+ * doi: 10.1093/bioinformatics/bty191
+ *
+ * Does pairwise alignments of genomes.
+ */
 process alignSelf {
 
     label "minimap2"
@@ -117,6 +131,13 @@ process alignSelf {
 aligned.set {aligned4Filter}
 
 
+/*
+ * fpa
+ * url: https://github.com/natir/fpa
+ *
+ * Filter minimap output to only include long alignments.
+ * Useful to reduce complexity of seqwish graph construction.
+ */
 process filterAlignment {
 
     label "fpa"
@@ -135,6 +156,12 @@ process filterAlignment {
 }
 
 
+/*
+ * seqwish
+ * url: https://github.com/ekg/seqwish
+ *
+ * This "squishes" alignments into a graph.
+ */
 process squishAlignments {
 
     label "seqwish"
@@ -146,10 +173,11 @@ process squishAlignments {
     set file("genomes.fasta.gz"),
         file("alignments.paf.gz") from combinedGenomes4Squish
             .combine(filtered)
+            .first()
 
     output:
     file "pan.gfa" into squishedAlignments
-    file "pan.vgp"
+    file "pan.vgp" optional true
 
     script:
     """
@@ -164,6 +192,10 @@ process squishAlignments {
 }
 
 
+/*
+ * ODGI
+ * url: https://github.com/vgteam/odgi
+ */
 process gfa2ODGI {
 
     label "odgi"
@@ -183,7 +215,11 @@ process gfa2ODGI {
 
 
 /*
-*/
+ * ODGI
+ * url: https://github.com/vgteam/odgi
+ *
+ * Makes this interesting plot.
+ */
 process visualiseGraph {
 
     label "odgi"
@@ -199,6 +235,101 @@ process visualiseGraph {
 
     script:
     """
-    odgi viz --threads "${task.cpus}" -i pan.dg -x 4000 -y 800 -L 0 -A=SN15 --show-strand -X 1 -P 10 -R -o pan.png
+    odgi viz \
+      --threads "${task.cpus}" \
+      -i pan.dg \
+      -x 4000 \
+      -y 800 \
+      -L 0 \
+      -A=SN15 \
+      --show-strand \
+      -X 1 \
+      -P 10 \
+      -R \
+      -o pan.png
     """
 }
+
+
+/*
+ */
+process gfa2VG {
+
+    label "vg"
+    label "small_task"
+
+    publishDir "${params.outdir}"
+
+    input:
+    file "pan.gfa" from squishedAlignments
+
+    output:
+    file "pan.vg" into vg
+
+    script:
+    // Parallelisation is limited for this step.
+    """
+    vg view \
+      --vg \
+      --gfa-in pan.gfa \
+      --threads "${task.cpus}" \
+    > pan.vg
+    """
+}
+
+
+/*
+ * Drop the path information and "chops" nodes to be no longer than 32 bp.
+ */
+process simplifyVG {
+
+    label "vg"
+    label "small_task"
+
+    publishDir "${params.outdir}"
+
+    input:
+    file "pan.vg" from vg
+
+    output:
+    file "simplified.vg" into simplifiedVG
+
+    script:
+    """
+    vg mod -X 32 pan.vg | vg ids -s - > simplified.vg 
+    """
+}
+
+
+/*
+ */
+process getVGGBWT {
+
+    label "vg"
+    label "big_task"
+
+    publishDir "${params.outdir}"
+
+    input:
+    file "simplified.vg" from simplifiedVG
+
+    output:
+    set file("simplified.vg"),
+        file("simplified.gbwt") into vgWithGBWT
+
+    script:
+    """
+    mkdir tmp
+    TMPDIR="\${PWD}/tmp"
+    vg index \
+      -T \
+      -
+      -G simplified.gbwt \
+      --temp-dir ./tmp \
+      --threads "${task.cpus}" \
+      simplified.vg
+
+    rm -rf -- tmp
+    """
+}
+
