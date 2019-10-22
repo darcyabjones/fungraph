@@ -52,6 +52,7 @@ process preprocessGenomes {
 
     label "posix"
     label "small_task"
+    time "1h"
 
     tag "${name}"
 
@@ -81,6 +82,7 @@ process joinGenomes {
 
     label "posix"
     label "small_task"
+    time "1h"
 
     input:
     file "*.fasta.gz" from preprocessedGenomes
@@ -113,6 +115,7 @@ process alignSelf {
 
     label "minimap2"
     label "big_task"
+    time "1d"
 
     input:
     file fasta from combinedGenomes4Align
@@ -142,6 +145,7 @@ process filterAlignment {
 
     label "fpa"
     label "small_task"
+    time "5h"
 
     input:
     file "aligned.paf.gz" from aligned4Filter
@@ -166,6 +170,7 @@ process squishAlignments {
 
     label "seqwish"
     label "big_task"
+    time "1d"
 
     publishDir "${params.outdir}"
 
@@ -200,6 +205,7 @@ process gfa2ODGI {
 
     label "odgi"
     label "small_task"
+    time "5h"
 
     input:
     file "pan.gfa" from squishedAlignments
@@ -224,6 +230,7 @@ process visualiseGraph {
 
     label "odgi"
     label "medium_task"
+    time "2h"
 
     publishDir "${params.outdir}"
 
@@ -256,7 +263,8 @@ process visualiseGraph {
 process gfa2VG {
 
     label "vg"
-    label "small_task"
+    label "biggish_task"
+    time "5h"
 
     publishDir "${params.outdir}"
 
@@ -284,7 +292,8 @@ process gfa2VG {
 process simplifyVG {
 
     label "vg"
-    label "small_task"
+    label "medium_task"
+    time "12h"
 
     publishDir "${params.outdir}"
 
@@ -296,7 +305,7 @@ process simplifyVG {
 
     script:
     """
-    vg mod -X 32 pan.vg | vg ids -s - > simplified.vg 
+    vg mod -X 32 --threads "${task.cpus}" pan.vg | vg ids -s - > simplified.vg 
     """
 }
 
@@ -306,7 +315,8 @@ process simplifyVG {
 process getVGXG {
 
     label "vg"
-    label "big_task"
+    label "biggish_task"
+    time "12h"
 
     publishDir "${params.outdir}"
 
@@ -336,6 +346,7 @@ process pruneGraph {
 
     label "vg"
     label "big_task"
+    time "1d"
 
     publishDir "${params.outdir}"
 
