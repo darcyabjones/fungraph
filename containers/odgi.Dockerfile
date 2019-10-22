@@ -17,15 +17,17 @@ RUN  set -eu \
        ca-certificates \
        cmake \
        git \
+       python3-dev \
        zlib1g-dev \
   && rm -rf /var/lib/apt/lists/* \
   && update-ca-certificates \
-  && git clone "${ODGI_REPO}" . \
+  && git clone --recursive "${ODGI_REPO}" . \
+  && git checkout "${ODGI_COMMIT}" \
   && cmake -DBUILD_STATIC=1 -H. -Bbuild \
   && cmake --build build -- -j 3 \
   && mkdir -p "${ODGI_PREFIX}/bin" \
   && cp bin/odgi "${ODGI_PREFIX}/bin" \
-  && add_runtime_dep libgomp1 zlib1g
+  && add_runtime_dep libgomp1 python3 zlib1g
 
 
 FROM "${IMAGE}"

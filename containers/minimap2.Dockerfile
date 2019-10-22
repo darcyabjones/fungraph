@@ -1,6 +1,6 @@
 ARG IMAGE
 
-FROM "${IMAGE}" as builder
+FROM "${IMAGE}" as minimap2_builder
 
 ARG MINIMAP2_TAG
 ARG MINIMAP2_REPO="https://github.com/lh3/minimap2.git"
@@ -55,9 +55,9 @@ LABEL k8.version="${K8_VERSION}"
 
 ENV PATH "${MINIMAP2_PREFIX}/bin:${K8_PREFIX}/bin:${PATH}"
 
-COPY --from=builder "${MINIMAP2_PREFIX}" "${MINIMAP2_PREFIX}"
-COPY --from=builder "${K8_PREFIX}" "${K8_PREFIX}"
-COPY --from=builder "${APT_REQUIREMENTS_FILE}" /build/apt/minimap2.txt
+COPY --from=minimap2_builder "${MINIMAP2_PREFIX}" "${MINIMAP2_PREFIX}"
+COPY --from=minimap2_builder "${K8_PREFIX}" "${K8_PREFIX}"
+COPY --from=minimap2_builder "${APT_REQUIREMENTS_FILE}" /build/apt/minimap2.txt
 
 RUN  set -eu \
   && DEBIAN_FRONTEND=noninteractive \

@@ -1,6 +1,6 @@
 ARG IMAGE
 
-FROM "${IMAGE}" as builder
+FROM "${IMAGE}" as seqtk_builder
 
 ARG SEQTK_COMMIT
 ARG SEQTK_REPO="https://github.com/lh3/seqtk.git"
@@ -38,8 +38,8 @@ LABEL seqtk.version="${SEQTK_COMMIT}"
 
 ENV PATH "${SEQTK_PREFIX}/bin:${PATH}"
 
-COPY --from=builder "${SEQTK_PREFIX}" "${SEQTK_PREFIX}"
-COPY --from=builder "${APT_REQUIREMENTS_FILE}" /build/apt/seqtk.txt
+COPY --from=seqtk_builder "${SEQTK_PREFIX}" "${SEQTK_PREFIX}"
+COPY --from=seqtk_builder "${APT_REQUIREMENTS_FILE}" /build/apt/seqtk.txt
 
 RUN  set -eu \
   && DEBIAN_FRONTEND=noninteractive \

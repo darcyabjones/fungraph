@@ -1,5 +1,5 @@
 PWD=$(shell pwd)
-DEBIAN_VERSION=buster-20190708-slim
+DEBIAN_VERSION=buster-20191014-slim
 TAG=fungraph-v0.0.1
 MAINTAINER=darcy.ab.jones@gmail.com
 DOCKER_USER=darcyabjones
@@ -26,7 +26,7 @@ SEQWISH_PREFIX_ARG=$(INSTALL_BASE)/seqwish/$(SEQWISH_COMMIT)
 FPA_VERSION=0.5.0
 FPA_PREFIX_ARG=$(INSTALL_BASE)/fpa/$(FPA_VERSION)
 
-ODGI_COMMIT=2461e5d
+ODGI_COMMIT=463ba5b
 ODGI_REPO=https://github.com/vgteam/odgi.git
 ODGI_PREFIX_ARG=$(INSTALL_BASE)/odgi/$(ODGI_COMMIT)
 
@@ -34,7 +34,7 @@ VG_VERSION=v1.19.0
 VG_URL=https://github.com/vgteam/vg/releases/download/v1.19.0/vg-v1.19.0.tar.gz
 VG_PREFIX_ARG=$(INSTALL_BASE)/vg/$(VG_VERSION)
 
-GENERAL=base minimap2 seqwish fpa odgi
+GENERAL=base minimap2 seqwish fpa odgi vg
 
 
 all: docker/all singularity/all
@@ -101,6 +101,18 @@ docker/base: base.Dockerfile
 	@touch $@
 
 
+docker/fpa: fpa.Dockerfile docker/base
+	docker build \
+	  --build-arg IMAGE="$(BASE_IMAGE)" \
+	  --build-arg FPA_VERSION="$(FPA_VERSION)" \
+	  --build-arg FPA_PREFIX_ARG="$(FPA_PREFIX_ARG)" \
+	  --file $< \
+	  -t "$(call make_image_name,$@)" \
+	  .
+	@mkdir -p "$(dir $@)"
+	@touch $@
+
+
 docker/minimap2: minimap2.Dockerfile docker/base
 	docker build \
 	  --build-arg IMAGE="$(BASE_IMAGE)" \
@@ -110,19 +122,6 @@ docker/minimap2: minimap2.Dockerfile docker/base
 	  --build-arg K8_VERSION="$(K8_VERSION)" \
 	  --build-arg K8_URL="$(K8_URL)" \
 	  --build-arg K8_PREFIX_ARG="$(K8_PREFIX_ARG)" \
-	  --file $< \
-	  -t "$(call make_image_name,$@)" \
-	  .
-	@mkdir -p "$(dir $@)"
-	@touch $@
-
-
-docker/seqwish: seqwish.Dockerfile docker/base
-	docker build \
-	  --build-arg IMAGE="$(BASE_IMAGE)" \
-	  --build-arg SEQWISH_COMMIT="$(SEQWISH_COMMIT)" \
-	  --build-arg SEQWISH_REPO="$(SEQWISH_REPO)" \
-	  --build-arg SEQWISH_PREFIX_ARG="$(SEQWISH_PREFIX_ARG)" \
 	  --file $< \
 	  -t "$(call make_image_name,$@)" \
 	  .
@@ -143,11 +142,12 @@ docker/odgi: odgi.Dockerfile docker/base
 	@touch $@
 
 
-docker/fpa: fpa.Dockerfile docker/base
+docker/seqwish: seqwish.Dockerfile docker/base
 	docker build \
 	  --build-arg IMAGE="$(BASE_IMAGE)" \
-	  --build-arg FPA_VERSION="$(FPA_VERSION)" \
-	  --build-arg FPA_PREFIX_ARG="$(FPA_PREFIX_ARG)" \
+	  --build-arg SEQWISH_COMMIT="$(SEQWISH_COMMIT)" \
+	  --build-arg SEQWISH_REPO="$(SEQWISH_REPO)" \
+	  --build-arg SEQWISH_PREFIX_ARG="$(SEQWISH_PREFIX_ARG)" \
 	  --file $< \
 	  -t "$(call make_image_name,$@)" \
 	  .
@@ -160,6 +160,35 @@ docker/vg: vg.Dockerfile docker/base
 	  --build-arg IMAGE="$(BASE_IMAGE)" \
 	  --build-arg VG_VERSION="$(VG_VERSION)" \
 	  --build-arg VG_URL="$(VG_URL)" \
+	  --build-arg VG_PREFIX_ARG="$(VG_PREFIX_ARG)" \
+	  --file $< \
+	  -t "$(call make_image_name,$@)" \
+	  .
+	@mkdir -p "$(dir $@)"
+	@touch $@
+
+
+docker/fungraph: docker/fpa docker/minimap2 docker/odgi
+docker/fungraph: docker/seqwish docker/vg
+docker/fungraph: fungraph.Dockerfile docker/base
+	docker build \
+	  --build-arg IMAGE="$(BASE_IMAGE)" \
+	  --build-arg FPA_IMAGE="$(call make_image_name,fpa)" \
+	  --build-arg FPA_VERSION="$(FPA_VERSION)" \
+	  --build-arg FPA_PREFIX_ARG="$(FPA_PREFIX_ARG)" \
+	  --build-arg MINIMAP2_IMAGE="$(call make_image_name,minimap2)" \
+	  --build-arg MINIMAP2_TAG="$(MINIMAP2_TAG)" \
+	  --build-arg MINIMAP2_PREFIX_ARG="$(MINIMAP2_PREFIX_ARG)" \
+	  --build-arg K8_VERSION="$(K8_VERSION)" \
+	  --build-arg K8_PREFIX_ARG="$(K8_PREFIX_ARG)" \
+	  --build-arg ODGI_IMAGE="$(call make_image_name,odgi)" \
+	  --build-arg ODGI_COMMIT="$(ODGI_COMMIT)" \
+	  --build-arg ODGI_PREFIX_ARG="$(ODGI_PREFIX_ARG)" \
+	  --build-arg SEQWISH_IMAGE="$(call make_image_name,seqwish)" \
+	  --build-arg SEQWISH_COMMIT="$(SEQWISH_COMMIT)" \
+	  --build-arg SEQWISH_PREFIX_ARG="$(SEQWISH_PREFIX_ARG)" \
+	  --build-arg VG_IMAGE="$(call make_image_name,vg)" \
+	  --build-arg VG_VERSION="$(VG_VERSION)" \
 	  --build-arg VG_PREFIX_ARG="$(VG_PREFIX_ARG)" \
 	  --file $< \
 	  -t "$(call make_image_name,$@)" \
