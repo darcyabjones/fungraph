@@ -25,7 +25,7 @@ if (params.help) {
 
 
 params.genomes = false
-
+params.aligner = "minigraph"
 params.minalign = 10000
 
 
@@ -74,128 +74,134 @@ process preprocessGenomes {
 }
 
 
-/*
- * All genomes need to be in the same file for minimap
- * all-vs-all alignment.
- */
-process joinGenomes {
+if ( params.aligner == "minigraph" ) {
 
-    label "posix"
-    label "small_task"
-    time "1h"
+} else if ( params.aligner == "seqwish" ) {
+	/*
+	 * All genomes need to be in the same file for minimap
+	 * all-vs-all alignment.
+	 */
+	process joinGenomes {
 
-    input:
-    file "*.fasta.gz" from preprocessedGenomes
-        .map { n, f -> f }
-        .collect()
+	    label "posix"
+	    label "small_task"
+	    time "1h"
 
-    output:
-    file "combined.fasta.gz" into combinedGenomes
+	    input:
+	    file "*.fasta.gz" from preprocessedGenomes
+		.map { n, f -> f }
+		.collect()
 
-    script:
-    """
-    cat *.fasta.gz > combined.fasta.gz
-    """
+	    output:
+	    file "combined.fasta.gz" into combinedGenomes
+
+	    script:
+	    """
+	    cat *.fasta.gz > combined.fasta.gz
+	    """
+	}
+
+	combinedGenomes.into {
+	    combinedGenomes4Align;
+	    combinedGenomes4Squish;
+	}
+
+
+	/*
+	 * Minimap2
+	 * url: https://github.com/lh3/minimap2
+	 * doi: 10.1093/bioinformatics/bty191
+	 *
+	 * Does pairwise alignments of genomes.
+	 */
+	process alignSelf {
+
+	    label "minimap2"
+	    label "big_task"
+	    time "1d"
+
+	    input:
+	    file fasta from combinedGenomes4Align
+
+	    output:
+	    file "aligned.paf.gz" into aligned
+
+	    script:
+	    """
+	    minimap2 -cx asm20 -X -t "${task.cpus}" "${fasta}" "${fasta}" \
+	    | gzip \
+	    > "aligned.paf.gz"
+	    """
+	}
+
+	aligned.set {aligned4Filter}
+
+
+	/*
+	 * fpa
+	 * url: https://github.com/natir/fpa
+	 *
+	 * Filter minimap output to only include long alignments.
+	 * Useful to reduce complexity of seqwish graph construction.
+	 */
+	process filterAlignment {
+
+	    label "fpa"
+	    label "small_task"
+	    time "5h"
+
+	    input:
+	    file "aligned.paf.gz" from aligned4Filter
+
+	    output:
+	    file "filtered.paf.gz" into filtered
+
+	    script:
+	    """
+	    zcat aligned.paf.gz | fpa drop -l "${params.minalign}" | gzip > filtered.paf.gz
+	    """
+	}
+
+
+	/*
+	 * seqwish
+	 * url: https://github.com/ekg/seqwish
+	 *
+	 * This "squishes" alignments into a graph.
+	 */
+	process squishAlignments {
+
+	    label "seqwish"
+	    label "big_task"
+	    time "1d"
+
+	    publishDir "${params.outdir}"
+
+	    input:
+	    set file("genomes.fasta.gz"),
+		file("alignments.paf.gz") from combinedGenomes4Squish
+		    .combine(filtered)
+		    .first()
+
+	    output:
+	    file "pan.gfa" into squishedAlignments
+	    file "pan.vgp" optional true
+
+	    script:
+	    """
+	    seqwish \
+		-s "genomes.fasta.gz" \
+		-p "alignments.paf.gz" \
+		-b pan.graph \
+		-o pan.vgp \
+		-g pan.gfa \
+		--threads "${task.cpus}"
+	    """
+	}
+} else {
+	log.error "Please select either minigraph or seqwish"
+        exit 1
 }
-
-combinedGenomes.into {
-    combinedGenomes4Align;
-    combinedGenomes4Squish;
-}
-
-
-/*
- * Minimap2
- * url: https://github.com/lh3/minimap2
- * doi: 10.1093/bioinformatics/bty191
- *
- * Does pairwise alignments of genomes.
- */
-process alignSelf {
-
-    label "minimap2"
-    label "big_task"
-    time "1d"
-
-    input:
-    file fasta from combinedGenomes4Align
-
-    output:
-    file "aligned.paf.gz" into aligned
-
-    script:
-    """
-    minimap2 -cx asm20 -X -t "${task.cpus}" "${fasta}" "${fasta}" \
-    | gzip \
-    > "aligned.paf.gz"
-    """
-}
-
-aligned.set {aligned4Filter}
-
-
-/*
- * fpa
- * url: https://github.com/natir/fpa
- *
- * Filter minimap output to only include long alignments.
- * Useful to reduce complexity of seqwish graph construction.
- */
-process filterAlignment {
-
-    label "fpa"
-    label "small_task"
-    time "5h"
-
-    input:
-    file "aligned.paf.gz" from aligned4Filter
-
-    output:
-    file "filtered.paf.gz" into filtered
-
-    script:
-    """
-    zcat aligned.paf.gz | fpa drop -l "${params.minalign}" | gzip > filtered.paf.gz
-    """
-}
-
-
-/*
- * seqwish
- * url: https://github.com/ekg/seqwish
- *
- * This "squishes" alignments into a graph.
- */
-process squishAlignments {
-
-    label "seqwish"
-    label "big_task"
-    time "1d"
-
-    publishDir "${params.outdir}"
-
-    input:
-    set file("genomes.fasta.gz"),
-        file("alignments.paf.gz") from combinedGenomes4Squish
-            .combine(filtered)
-            .first()
-
-    output:
-    file "pan.gfa" into squishedAlignments
-    file "pan.vgp" optional true
-
-    script:
-    """
-    seqwish \
-        -s "genomes.fasta.gz" \
-        -p "alignments.paf.gz" \
-        -b pan.graph \
-        -o pan.vgp \
-        -g pan.gfa \
-        --threads "${task.cpus}"
-    """
-}
-
 
 /*
  * ODGI
@@ -206,6 +212,8 @@ process gfa2ODGI {
     label "odgi"
     label "small_task"
     time "5h"
+
+    publishDir "${params.outdir}"
 
     input:
     file "pan.gfa" from squishedAlignments
@@ -220,6 +228,11 @@ process gfa2ODGI {
 }
 
 
+odgiGraph.into {
+    odgiGraph4VisualiseGraph;
+    odgiGraph4SimplifyGraph;
+}
+
 /*
  * ODGI
  * url: https://github.com/vgteam/odgi
@@ -229,13 +242,13 @@ process gfa2ODGI {
 process visualiseGraph {
 
     label "odgi"
-    label "medium_task"
+    label "big_task"
     time "2h"
 
     publishDir "${params.outdir}"
 
     input:
-    file "pan.dg" from odgiGraph
+    file "pan.dg" from odgiGraph4VisualiseGraph
 
     output:
     file "pan.png"
@@ -258,8 +271,61 @@ process visualiseGraph {
 }
 
 
+process simplifyODGI {
+
+    label "odgi"
+    label "big_task"
+
+    publishDir "${params.outdir}"
+
+    input:
+    file "pan.dg" from odgiGraph4SimplifyGraph
+
+    output:
+    file "pruned.dg" into prunedODGI
+    file "pruned.stats"
+
+    script:
+    """
+    odgi prune -i pan.dg -o pruned.dg --threads "${task.cpus}" 
+    odgi stats -S -i pruned.dg > pruned.stats
+    """
+}
+
+
+process visualisePrunedGraph {
+
+    label "odgi"
+    label "big_task"
+    time "2h"
+
+    publishDir "${params.outdir}"
+
+    input:
+    file "pan.dg" from prunedODGI
+
+    output:
+    file "pruned.png"
+
+    script:
+    """
+    odgi viz \
+      --threads "${task.cpus}" \
+      -i pan.dg \
+      -x 4000 \
+      -y 800 \
+      -L 0 \
+      -A=SN15 \
+      --show-strand \
+      -X 1 \
+      -P 10 \
+      -R \
+      -o pruned.png
+    """
+}
+
+
 /*
- */
 process gfa2VG {
 
     label "vg"
@@ -284,11 +350,11 @@ process gfa2VG {
     > pan.vg
     """
 }
+ */
 
 
 /*
  * Drop the path information and "chops" nodes to be no longer than 32 bp.
- */
 process simplifyVG {
 
     label "vg"
@@ -308,10 +374,10 @@ process simplifyVG {
     vg mod -X 32 --threads "${task.cpus}" pan.vg | vg ids -s - > simplified.vg 
     """
 }
+ */
 
 
 /*
- */
 process getVGXG {
 
     label "vg"
@@ -340,8 +406,9 @@ process getVGXG {
     rm -rf -- tmp
     """
 }
+ */
 
-
+/*
 process pruneGraph {
 
     label "vg"
@@ -381,3 +448,4 @@ process pruneGraph {
       pruned.vg
     """
 }
+*/

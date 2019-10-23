@@ -34,7 +34,15 @@ VG_VERSION=v1.19.0
 VG_URL=https://github.com/vgteam/vg/releases/download/v1.19.0/vg-v1.19.0.tar.gz
 VG_PREFIX_ARG=$(INSTALL_BASE)/vg/$(VG_VERSION)
 
-GENERAL=base minimap2 seqwish fpa odgi vg
+MINIGRAPH_COMMIT=b1976de
+MINIGRAPH_REPO=https://github.com/lh3/minigraph.git
+MINIGRAPH_PREFIX_ARG=$(INSTALL_BASE)/minigraph/$(MINIGRAPH_COMMIT)
+
+GFATOOLS_COMMIT=858a87b
+GFATOOLS_REPO=https://github.com/lh3/gfatools.git
+GFATOOLS_PREFIX_ARG=$(INSTALL_BASE)/GFATOOLS/$(GFATOOLS_COMMIT)
+
+GENERAL=base minimap2 seqwish fpa odgi vg minigraph gfatools
 
 
 all: docker/all singularity/all
@@ -113,6 +121,19 @@ docker/fpa: fpa.Dockerfile docker/base
 	@touch $@
 
 
+docker/gfatools: gfatools.Dockerfile docker/base
+	docker build \
+	  --build-arg IMAGE="$(BASE_IMAGE)" \
+	  --build-arg GFATOOLS_COMMIT="$(GFATOOLS_COMMIT)" \
+	  --build-arg GFATOOLS_REPO="$(GFATOOLS_REPO)" \
+	  --build-arg GFATOOLS_PREFIX_ARG="$(GFATOOLS_PREFIX_ARG)" \
+	  --file $< \
+	  -t "$(call make_image_name,$@)" \
+	  .
+	@mkdir -p "$(dir $@)"
+	@touch $@
+
+
 docker/minimap2: minimap2.Dockerfile docker/base
 	docker build \
 	  --build-arg IMAGE="$(BASE_IMAGE)" \
@@ -122,6 +143,19 @@ docker/minimap2: minimap2.Dockerfile docker/base
 	  --build-arg K8_VERSION="$(K8_VERSION)" \
 	  --build-arg K8_URL="$(K8_URL)" \
 	  --build-arg K8_PREFIX_ARG="$(K8_PREFIX_ARG)" \
+	  --file $< \
+	  -t "$(call make_image_name,$@)" \
+	  .
+	@mkdir -p "$(dir $@)"
+	@touch $@
+
+
+docker/minigraph: minigraph.Dockerfile docker/base
+	docker build \
+	  --build-arg IMAGE="$(BASE_IMAGE)" \
+	  --build-arg MINIGRAPH_COMMIT="$(MINIGRAPH_COMMIT)" \
+	  --build-arg MINIGRAPH_REPO="$(MINIGRAPH_REPO)" \
+	  --build-arg MINIGRAPH_PREFIX_ARG="$(MINIGRAPH_PREFIX_ARG)" \
 	  --file $< \
 	  -t "$(call make_image_name,$@)" \
 	  .
