@@ -25,8 +25,9 @@ if (params.help) {
 
 
 params.genomes = false
-params.minalign = 10000
 params.minigraph_preset = "ggs"
+params.max_ns = 50
+params.min_contig = 1000
 
 if ( params.genomes ) {
     Channel
@@ -54,24 +55,59 @@ process preprocessGenomes {
     label "small_task"
     time "1h"
 
-    publishDir "${params.outdir}"
     tag "${name}"
 
     input:
-    set val(name), file(fasta) from genomes4PreprocessGenomes
+    set val(name), file("in.fasta") from genomes4PreprocessGenomes
 
     output:
-    set val(name), file("${name}.fasta.gz") into preprocessedGenomes
+    set val(name), file("out.fasta") into preprocessedGenomes
 
     script:
     """
     awk -v name="${name}" '
         /^>/ { print ">" name "." substr(\$1, 2) }
         \$0 !~ />/ { print toupper(\$0) }
-    ' "${fasta}" \
-    | gzip \
-    > "${name}.fasta.gz"
+    ' in.fasta \
+    > "out.fasta"
     """
+}
+
+
+preprocessedGenomes.set {
+    preprocessedGenomes4UnscaffoldGenomes;
+}
+
+
+process unscaffoldGenomes {
+
+    label "python3"
+    label "small_task"
+    time "1h"
+
+    tag "${name}"
+
+    input:
+    set val(name),
+        file("in.fasta") from preprocessedGenomes4UnscaffoldGenomes
+
+    output:
+    set val(name),
+        file("out.fasta") into unscaffoldedGenomes
+
+    script:
+    """
+    split_at_n_stretch.py \
+      --nsize "${params.max_ns}" \
+      --min-length "${params.min_contig}" \
+      -o out.fasta \
+      in.fasta
+    """
+}
+
+
+unscaffoldedGenomes.set {
+    unscaffoldedGenomes4RealignScaffoldsToGraph;
 }
 
 
@@ -84,11 +120,12 @@ process assembleMinigraph {
     publishDir "${params.outdir}"
 
     input:
-    file "genomes/*" from preprocessedGenomes
+    file "genomes/*" from unscaffoldGenomes
         .map { n, f -> f }
         .collect()
 
     output:
+    file "pan_minigraph.gfa" into minigraphAssembly
     file "pan_minigraph.rgfa" into minigraphAssembly
 
     script:
@@ -97,32 +134,124 @@ process assembleMinigraph {
       -x "${params.minigraph_preset}" \
       -t "${task.cpus}" \
       -o pan_minigraph.rgfa \
-      genomes/SN15.fasta.gz genomes/*
+      genomes/*
+
+    # This returns a canonical gfa that can be put into vg and odgi.
+    echo -e "H\\tVN:Z:1.0" > pan_minigraph.gfa
+    awk '
+      BEGIN {OFS="\\t"}
+      \$0 ~ /^S/ {
+        \$2=gensub(/^s/, "", "g", \$2);
+        \$0=\$1 "\\t" \$2 "\\t" \$3
+      }
+      \$0 ~ /^L/ {
+        \$2=gensub(/^s/, "", "g", \$2);
+        \$4=gensub(/^s/, "", "g", \$4);
+        \$0=\$1 "\\t" \$2 "\\t" \$3 "\\t" \$4 "\\t" \$5 "\\t" \$6
+      }
+      { print }
+    ' pan_minigraph.rgfa \
+    >> pan_minigraph.gfa
     """
 }
 
 
-process getGraphSequence {
+/*
+ */
+process gfa2VG {
 
-    label "gfatools"
-    label "small_task"
-    time "2h"
+    label "vg"
+    label "medium_task"
+    time "5h"
 
     publishDir "${params.outdir}"
 
     input:
-    file "pan_minigraph.rgfa" from minigraphAssembly
+    file "pan.gfa" from minigraphAssembly
 
     output:
-    file "pan.fasta" into panFasta
+    file "pan_minigraph.vg" into initialVg
 
     script:
+    // Parallelisation is limited for this step.
     """
-    gfatools gfa2fa -s pan_minigraph.rgfa > pan.fasta
+    vg view \
+      --vg \
+      --gfa-in pan.gfa \
+      --threads "${task.cpus}" \
+    > pan_minigraph.vg
     """
 }
 
 
+/*
+ */
+process explodeVG {
+
+    label "vg"
+    label "medium_task"
+    time "5h"
+
+    publishDir "${params.outdir}/pan_minigraph"
+
+    input:
+    file "pan.vg" from initialVg
+
+    output:
+    file "exploded/*.vg" into explodedInitialVg mode flatten
+
+    script:
+    """
+    vg explode \
+      --threads "${task.cpus}" \
+      pan.vg \
+      exploded
+    """
+}
+
+
+explodedInitialVg
+    .map { v -> [v.baseName, v] }
+    .set { explodedInitialVg4RealignScaffoldsToGraph }
+
+
+/*
+ */
+process realignScaffoldsToGraph {
+
+    label "vg"
+    label "big_task"
+    time "1d"
+
+    publishDir "${params.outdir}/pan_minigraph_realign"
+    tag "${component} - ${name}"
+
+    input:
+    set val(component),
+        file("component.vg"),
+        val(name),
+        file("genome.fasta") from explodedInitialVg4RealignScaffoldsToGraph
+            .combine(unscaffoldedGenomes4RealignScaffoldsToGraph)
+
+    output:
+    set val(component),
+        val(name),
+        file("${component}_${name}.gam") into realignedScaffoldsToGraph
+
+    script:
+    """
+    vg map \
+      -x component.xg \
+      -g component.gcsa \
+      -t "${task.cpus}" \
+      -m long \
+      --fasta genome.fasta \
+    > "${component}_${name}.gam"
+    """
+}
+
+
+/*
 process callMinimapVariants {
 
     label "minimap2"
@@ -157,50 +286,9 @@ process callMinimapVariants {
     rm -rf -- tmp
     """
 }
+*/
 
-/*
- */
-process gfa2VG {
 
-    label "vg"
-    label "biggish_task"
-    time "5h"
-
-    publishDir "${params.outdir}"
-
-    input:
-    file "pan.rgfa" from minigraphAssembly
-
-    output:
-    file "pan.vg" into vg
-    file "pan.gfa"
-
-    script:
-    // Parallelisation is limited for this step.
-    """
-    echo -e "H\\tVN:Z:1.0" > pan.gfa
-    awk '
-      BEGIN {OFS="\\t"}
-      \$0 ~ /^S/ {
-        \$2=gensub(/^s/, "", "g", \$2);
-        \$0=\$1 "\\t" \$2 "\\t" \$3
-      }
-      \$0 ~ /^L/ {
-        \$2=gensub(/^s/, "", "g", \$2);
-        \$4=gensub(/^s/, "", "g", \$4);
-        \$0=\$1 "\\t" \$2 "\\t" \$3 "\\t" \$4 "\\t" \$5 "\\t" \$6
-      }
-      { print }
-    ' pan.rgfa \
-    >> pan.gfa
-
-    vg view \
-      --vg \
-      --gfa-in pan.gfa \
-      --threads "${task.cpus}" \
-    > pan.vg
-    """
-}
 
 
 /*
