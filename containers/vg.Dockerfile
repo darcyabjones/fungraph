@@ -48,7 +48,7 @@ RUN  set -eu \
   && wget -O vg.tar.gz "${VG_URL}" \
   && tar -zxf vg.tar.gz \
   && cd vg-*/ \
-  && make \
+  && make static \
   && mkdir -p "${VG_PREFIX}" \
   && cp -r bin "${VG_PREFIX}" \
   && add_runtime_dep \

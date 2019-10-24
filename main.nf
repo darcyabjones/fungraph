@@ -26,7 +26,7 @@ if (params.help) {
 
 params.genomes = false
 params.minalign = 10000
-params.minigraph_preset = "asm20"
+params.minigraph_preset = "ggs"
 
 if ( params.genomes ) {
     Channel
@@ -39,8 +39,9 @@ if ( params.genomes ) {
 }
 
 
-genomes.set {
-    genomes4PreprocessGenomes
+genomes.into {
+    genomes4PreprocessGenomes;
+    genomes4CallMinimapVariants;
 }
 
 
@@ -53,6 +54,7 @@ process preprocessGenomes {
     label "small_task"
     time "1h"
 
+    publishDir "${params.outdir}"
     tag "${name}"
 
     input:
@@ -79,13 +81,15 @@ process assembleMinigraph {
     label "big_task"
     time "1d"
 
+    publishDir "${params.outdir}"
+
     input:
-    file "genomes/*.fasta.gz" from preprocessedGenomes
+    file "genomes/*" from preprocessedGenomes
         .map { n, f -> f }
         .collect()
 
     output:
-    file "pan_minigraph.rgfa"
+    file "pan_minigraph.rgfa" into minigraphAssembly
 
     script:
     """
@@ -93,13 +97,69 @@ process assembleMinigraph {
       -x "${params.minigraph_preset}" \
       -t "${task.cpus}" \
       -o pan_minigraph.rgfa \
-      genomes/*.fasta.gz
+      genomes/SN15.fasta.gz genomes/*
     """
 }
 
 
+process getGraphSequence {
+
+    label "gfatools"
+    label "small_task"
+    time "2h"
+
+    publishDir "${params.outdir}"
+
+    input:
+    file "pan_minigraph.rgfa" from minigraphAssembly
+
+    output:
+    file "pan.fasta" into panFasta
+
+    script:
+    """
+    gfatools gfa2fa -s pan_minigraph.rgfa > pan.fasta
+    """
+}
+
+
+process callMinimapVariants {
+
+    label "minimap2"
+    label "medium_task"
+    time "4h"
+
+    publishDir "${params.outdir}/paf_call"
+
+    input:
+    file "pan.fasta" from panFasta
+    set val(name), file("genome.fasta") from genomes4CallMinimapVariants
+
+    output:
+    file "${name}_minimap2.paf"
+    file "${name}_minimap2.var"
+
+    script:
+    """
+    mkdir -p tmp
+    minimap2 -cx asm20 -t${task.cpus} --cs pan.fasta genome.fasta \
+    | sort -k6,6 -k8,8n --temporary-directory=tmp \
+    > "${name}_minimap2.paf" 
+
+    paftools.js call \
+      -l 1000 \
+      -L 10000 \
+      -f pan.fasta \
+      -s "${name}" \
+      "${name}_minimap2.paf" \
+    > "${name}_minimap2.var"
+
+    rm -rf -- tmp
+    """
+}
 
 /*
+ */
 process gfa2VG {
 
     label "vg"
@@ -109,14 +169,31 @@ process gfa2VG {
     publishDir "${params.outdir}"
 
     input:
-    file "pan.gfa" from squishedAlignments
+    file "pan.rgfa" from minigraphAssembly
 
     output:
     file "pan.vg" into vg
+    file "pan.gfa"
 
     script:
     // Parallelisation is limited for this step.
     """
+    echo -e "H\\tVN:Z:1.0" > pan.gfa
+    awk '
+      BEGIN {OFS="\\t"}
+      \$0 ~ /^S/ {
+        \$2=gensub(/^s/, "", "g", \$2);
+        \$0=\$1 "\\t" \$2 "\\t" \$3
+      }
+      \$0 ~ /^L/ {
+        \$2=gensub(/^s/, "", "g", \$2);
+        \$4=gensub(/^s/, "", "g", \$4);
+        \$0=\$1 "\\t" \$2 "\\t" \$3 "\\t" \$4 "\\t" \$5 "\\t" \$6
+      }
+      { print }
+    ' pan.rgfa \
+    >> pan.gfa
+
     vg view \
       --vg \
       --gfa-in pan.gfa \
@@ -124,11 +201,11 @@ process gfa2VG {
     > pan.vg
     """
 }
- */
 
 
 /*
  * Drop the path information and "chops" nodes to be no longer than 32 bp.
+ */
 process simplifyVG {
 
     label "vg"
@@ -145,13 +222,14 @@ process simplifyVG {
 
     script:
     """
-    vg mod -X 32 --threads "${task.cpus}" pan.vg | vg ids -s - > simplified.vg
+    vg mod -X 32 pan.vg > mod.vg
+    vg ids -s mod.vg > simplified.vg
     """
 }
- */
 
 
 /*
+ */
 process getVGXG {
 
     label "vg"
@@ -180,9 +258,9 @@ process getVGXG {
     rm -rf -- tmp
     """
 }
- */
 
 /*
+*/
 process pruneGraph {
 
     label "vg"
@@ -198,7 +276,8 @@ process pruneGraph {
     output:
     set file("simplified.vg"),
         file("simplified.xg"),
-        file("simplified.gcsa") into prunedGraph
+        file("simplified.gcsa"),
+        file("simplified.gcsa.lcp") into prunedGraph
 
     script:
     """
@@ -222,7 +301,6 @@ process pruneGraph {
       pruned.vg
     """
 }
-*/
 
 
 // /*
