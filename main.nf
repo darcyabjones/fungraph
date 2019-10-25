@@ -107,6 +107,9 @@ process unscaffoldGenomes {
 
 
 unscaffoldedGenomes.set {
+    unscaffoldGenomes4AssembleMinigraph;
+    unscaffoldedGenomes4FindComponentContigs;
+    unscaffoldedGenomes4SelectBestContigsForComponents;
     unscaffoldedGenomes4RealignScaffoldsToGraph;
 }
 
@@ -120,7 +123,7 @@ process assembleMinigraph {
     publishDir "${params.outdir}"
 
     input:
-    file "genomes/*" from unscaffoldGenomes
+    file "genomes/*" from unscaffoldGenomes4AssembleMinigraph
         .map { n, f -> f }
         .collect()
 
@@ -158,19 +161,20 @@ process assembleMinigraph {
 
 /*
  */
-process gfa2VG {
+process gfa2InitialVG {
 
     label "vg"
     label "medium_task"
     time "5h"
 
-    publishDir "${params.outdir}"
+    publishDir "${params.outdir}/initial"
 
     input:
     file "pan.gfa" from minigraphAssembly
 
     output:
-    file "pan_minigraph.vg" into initialVg
+    file "initial" into initialVg
+    file "gfas/*" into initialGfas mode flatten
 
     script:
     // Parallelisation is limited for this step.
@@ -179,56 +183,276 @@ process gfa2VG {
       --vg \
       --gfa-in pan.gfa \
       --threads "${task.cpus}" \
-    > pan_minigraph.vg
+    > pan.vg
+
+    vg explode \
+      --threads "${task.cpus}" \
+      pan.vg \
+      initial
+
+    mkdir -p gfas
+    find initial -name "*.vg" -printf '%f\\0' \
+    | xargs -0 -P "${task.cpus}" -I {} -- \
+        bash -eu -c '
+            F="{}";
+            B="\${F%.*}";
+            vg view --vg-in --gfa "initial/{}" > "gfas/\${B}.gfa"
+        '
+    """
+}
+
+
+process findComponentContigs {
+
+    label "minigraph"
+    label "medium_task"
+    time "5h"
+
+    input:
+    set val(component),
+        file("component.gfa"),
+        file("genomes/*.fasta") from initialGfas
+            .map { f -> [f.baseName, f] }
+            .combine(
+                unscaffoldedGenomes4FindComponentContigs
+                    .map { n, f -> f }
+                    .collect()
+            )
+
+    output:
+    set val(component),
+        file("${component}.gaf") into alignedComponentContigs
+
+    script:
+    """
+    minigraph \
+      -x lr \
+      -N 0 \
+      -t "${task.cpus}" \
+      -o "${component}.gaf \
+      component.gfa \
+      genomes/*.fasta
+    """
+}
+
+
+process selectBestContigsForComponents {
+
+    label "python3"
+    label "small_task"
+    time "3h"
+
+    publishDir "${params.outdir}"
+
+    input:
+    file "gafs/*" from alignedComponentContigs
+        .map { c, g -> g }
+        .collect()
+
+    file "fastas/*.fasta" from unscaffoldedGenomes4SelectBestContigsForComponents
+        .map { n, f -> f }
+        .collect()
+
+    output:
+    file "components/*.fasta" into bestContigsForComponents mode flatten
+    file "contigs_to_components.tsv"
+
+    script:
+    """
+    select_best_contigs_for_components.py \
+      --min-coverage 0.5 \
+      --outfile contigs_to_components.tsv \
+      gafs/*
+
+    cat fastas/* > combined.fasta
+
+    mkdir -p components
+    select_sequences.py \
+        --outdir components \
+        contigs_to_components.tsv \
+        combined.fasta
+
+    rm combined.fasta
     """
 }
 
 
 /*
  */
-process explodeVG {
+process chopInitialVG {
 
     label "vg"
     label "medium_task"
     time "5h"
 
-    publishDir "${params.outdir}/pan_minigraph"
+    publishDir "${params.outdir}/initial"
 
     input:
-    file "pan.vg" from initialVg
+    file "in" from initialVg
 
     output:
-    file "exploded/*.vg" into explodedInitialVg mode flatten
+    file "initial/*.vg" into choppedInitialVg mode flatten
 
     script:
     """
-    vg explode \
-      --threads "${task.cpus}" \
-      pan.vg \
-      exploded
+    mkdir -p initial
+    find in -name "*.vg" -printf '%f\\0' \
+    | xargs -0 -P "${task.cpus}" -I {} -- \
+        bash -eu -c 'vg mod -X 32 "in/{}" > "initial/{}"'
+
+    vg ids -s -j initial/*
     """
 }
 
 
+
+
+
 explodedInitialVg
     .map { v -> [v.baseName, v] }
-    .set { explodedInitialVg4RealignScaffoldsToGraph }
+    .into {
+        explodedInitialVg4GetInitialComponentsGFA;
+        explodedInitialVg4GetInitialVGXG;
+        explodedInitialVg4PruneInitialVG;
+        explodedInitialVg4CombineInitialIndices;
+    }
+
 
 
 /*
  */
-process realignScaffoldsToGraph {
+process getInitialXG {
+
+    label "vg"
+    label "biggish_task"
+    time "12h"
+
+    publishDir "${params.outdir}/initial"
+
+    tag "${component}"
+
+    input:
+    set val(component),
+        file("input.vg") from explodedInitialVg4GetInitialVGXG
+
+    output:
+    set val(component),
+        file("${component}.xg") into explodedInitialXG
+
+    script:
+    """
+    mkdir tmp
+    TMPDIR="\${PWD}/tmp"
+    vg index \
+      -x "${component}.xg" \
+      --temp-dir ./tmp \
+      --threads "${task.cpus}" \
+      input.vg
+
+    rm -rf -- tmp
+    """
+}
+
+
+/*
+ */
+process pruneInitialVG {
 
     label "vg"
     label "big_task"
     time "1d"
 
-    publishDir "${params.outdir}/pan_minigraph_realign"
+    tag "${component}"
+
+    input:
+    set val(component),
+        file("input.vg") from explodedInitialVg4PruneInitialVG
+
+    output:
+    set val(component),
+        file("pruned.vg"),
+        file("node_mapping") into explodedInitialPrunedVg
+
+    script:
+    """
+    vg mod -M 32 input.vg > simplified.vg
+
+    vg prune \
+      -u simplified.vg \
+      -m node_mapping \
+      --threads "${task.cpus}" \
+    > pruned.vg
+
+    rm -f simplified.vg
+    """
+}
+
+
+/*
+ */
+process getInitialVGGCSA {
+
+    label "vg"
+    label "big_task"
+    time "1d"
+
+    publishDir "${params.outdir}/initial"
+
+    tag "${component}"
+
+    input:
+    set val(component),
+        file("pruned.vg"),
+        file("node_mapping") from explodedInitialPrunedVg
+
+    output:
+    set val(component),
+        val("${component}.gcsa") into explodedInitialGCSA
+
+    script:
+    """
+    mkdir tmp
+    TMPDIR="\${PWD}/tmp"
+
+    vg index \
+      -g initial.gcsa \
+      -f node_mapping \
+      --temp-dir ./tmp \
+      --threads "${task.cpus}" \
+      --progress \
+      pruned.vg
+
+    rm -rf -- tmp
+    """
+}
+
+
+explodedInitialVg4CombineInitialIndices
+    .join(explodedInitialXG, by: 0)
+    .join(explodedInitialGCSA, by: 0)
+    .into {
+        explodedInitialGraph4RealignGenomesToInitialGraph;
+        explodedInitialGraph4AddPathsToInitialGraph;
+    }
+
+
+
+/* It might be better to do this as an MGSA?
+ */
+process realignScaffoldsToInitialGraph {
+
+    label "vg"
+    label "big_task"
+    time "1d"
+
+    publishDir "${params.outdir}/initial/aligned"
     tag "${component} - ${name}"
 
     input:
     set val(component),
         file("component.vg"),
+        file("component.xg"),
+        file("component.gcsa"),
         val(name),
         file("genome.fasta") from explodedInitialVg4RealignScaffoldsToGraph
             .combine(unscaffoldedGenomes4RealignScaffoldsToGraph)
@@ -236,7 +460,7 @@ process realignScaffoldsToGraph {
     output:
     set val(component),
         val(name),
-        file("${component}_${name}.gam") into realignedScaffoldsToGraph
+        file("${component}_${name}.gam") into realignedScaffoldsToInitialGraph
 
     script:
     """
@@ -247,6 +471,52 @@ process realignScaffoldsToGraph {
       -m long \
       --fasta genome.fasta \
     > "${component}_${name}.gam"
+    """
+}
+
+
+/*
+ */
+process addPathsToInitialGraph {
+
+    label "vg"
+    label "small_task"
+    time "1d"
+
+    publishDir "${params.outdir}/with_paths"
+
+    tag "${component}"
+
+    input:
+    set val(component),
+        file("component.vg"),
+        file("component.xg"),
+        file("component.gcsa"),
+        file("gams/*.gam") from realignedScaffoldsToInitialGraph
+            .map { c, n, g -> [c, g] }
+            .groupTuple(by: 0)
+
+    output:
+
+    script:
+    """
+    cat gams/*.gam > single.gam
+
+    vg augment \
+      --include-paths \
+      --cut-softclips \
+      component.vg \
+      single.gam \
+    > tmp.vg
+
+    vg mod \
+      --remove-non-path \
+      --X 32 \
+      --threads "${task.cpus}" \
+      tmp.vg \
+    > "${component}_with_paths.vg"
+
+    rm -f single.gam tmp.vg
     """
 }
 
@@ -289,106 +559,6 @@ process callMinimapVariants {
 */
 
 
-
-
-/*
- * Drop the path information and "chops" nodes to be no longer than 32 bp.
- */
-process simplifyVG {
-
-    label "vg"
-    label "medium_task"
-    time "12h"
-
-    publishDir "${params.outdir}"
-
-    input:
-    file "pan.vg" from vg
-
-    output:
-    file "simplified.vg" into simplifiedVG
-
-    script:
-    """
-    vg mod -X 32 pan.vg > mod.vg
-    vg ids -s mod.vg > simplified.vg
-    """
-}
-
-
-/*
- */
-process getVGXG {
-
-    label "vg"
-    label "biggish_task"
-    time "12h"
-
-    publishDir "${params.outdir}"
-
-    input:
-    file "simplified.vg" from simplifiedVG
-
-    output:
-    set file("simplified.vg"),
-        file("simplified.xg") into vgWithXG
-
-    script:
-    """
-    mkdir tmp
-    TMPDIR="\${PWD}/tmp"
-    vg index \
-      -x simplified.xg \
-      --temp-dir ./tmp \
-      --threads "${task.cpus}" \
-      simplified.vg
-
-    rm -rf -- tmp
-    """
-}
-
-/*
-*/
-process pruneGraph {
-
-    label "vg"
-    label "big_task"
-    time "1d"
-
-    publishDir "${params.outdir}"
-
-    input:
-    set file("simplified.vg"),
-        file("simplified.xg") from vgWithXG
-
-    output:
-    set file("simplified.vg"),
-        file("simplified.xg"),
-        file("simplified.gcsa"),
-        file("simplified.gcsa.lcp") into prunedGraph
-
-    script:
-    """
-    mkdir tmp
-    TMPDIR="\${PWD}/tmp"
-
-    vg mod -M 32 simplified.vg > resimplified.vg
-
-    vg prune \
-      -u resimplified.vg \
-      -m node_mapping \
-      --threads "${task.cpus}" \
-    > pruned.vg
-
-    vg index \
-      -g simplified.gcsa \
-      -f node_mapping \
-      --temp-dir ./tmp \
-      --threads "${task.cpus}" \
-      --progress \
-      pruned.vg
-    """
-}
 
 
 // /*
