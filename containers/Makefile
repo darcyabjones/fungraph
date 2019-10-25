@@ -42,7 +42,7 @@ GFATOOLS_COMMIT=858a87b
 GFATOOLS_REPO=https://github.com/lh3/gfatools.git
 GFATOOLS_PREFIX_ARG=$(INSTALL_BASE)/GFATOOLS/$(GFATOOLS_COMMIT)
 
-GENERAL=base minimap2 seqwish fpa odgi vg minigraph gfatools
+GENERAL=base python3 minimap2 seqwish fpa odgi vg minigraph gfatools
 
 
 all: docker/all singularity/all
@@ -102,6 +102,16 @@ docker/base: base.Dockerfile
 	  --build-arg DEBIAN_VERSION=$(DEBIAN_VERSION) \
 	  --build-arg MAINTAINER="$(MAINTAINER)" \
 	  --build-arg PIPELINE_VERSION="$(TAG)" \
+	  --file $< \
+	  -t "$(call make_image_name,$@)" \
+	  .
+	@mkdir -p "$(dir $@)"
+	@touch $@
+
+
+docker/python3: python3.Dockerfile docker/base
+	docker build \
+	  --build-arg IMAGE="$(BASE_IMAGE)" \
 	  --file $< \
 	  -t "$(call make_image_name,$@)" \
 	  .
