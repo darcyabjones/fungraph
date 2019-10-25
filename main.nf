@@ -106,7 +106,7 @@ process unscaffoldGenomes {
 }
 
 
-unscaffoldedGenomes.set {
+unscaffoldedGenomes.into {
     unscaffoldGenomes4AssembleMinigraph;
     unscaffoldedGenomes4FindComponentContigs;
     unscaffoldedGenomes4SelectBestContigsForComponents;
@@ -120,16 +120,16 @@ process assembleMinigraph {
     label "big_task"
     time "1d"
 
-    publishDir "${params.outdir}"
+    publishDir "${params.outdir}/initial"
 
     input:
-    file "genomes/*" from unscaffoldGenomes4AssembleMinigraph
+    file "genomes/*.fasta" from unscaffoldGenomes4AssembleMinigraph
         .map { n, f -> f }
         .collect()
 
     output:
     file "pan_minigraph.gfa" into minigraphAssembly
-    file "pan_minigraph.rgfa" into minigraphAssembly
+    file "pan_minigraph.rgfa"
 
     script:
     """
@@ -167,7 +167,7 @@ process gfa2InitialVG {
     label "medium_task"
     time "5h"
 
-    publishDir "${params.outdir}/initial"
+    publishDir "${params.outdir}/initial/gfas"
 
     input:
     file "pan.gfa" from minigraphAssembly
@@ -207,10 +207,10 @@ process gfa2InitialVG {
 process chopInitialVG {
 
     label "vg"
-    label "medium_task"
+    label "big_task"
     time "5h"
 
-    publishDir "${params.outdir}/initial"
+    publishDir "${params.outdir}/initial/vg"
 
     input:
     file "in" from initialVg
@@ -221,9 +221,10 @@ process chopInitialVG {
     script:
     """
     mkdir -p initial
-    find in -name "*.vg" -printf '%f\\0' \
-    | xargs -0 -P "${task.cpus}" -I {} -- \
-        bash -eu -c 'vg mod -X 32 "in/{}" > "initial/{}"'
+
+    find in/ -name "*.vg" -printf '%f\\0' \
+    | xargs -0 -P 1 -I {} -- \
+        bash -eu -c 'vg mod -X 32 in/{} > initial/{}'
 
     vg ids -s -j initial/*
     """
@@ -236,6 +237,9 @@ process findComponentContigs {
     label "medium_task"
     time "5h"
 
+    publishDir "${params.outdir}/initial/gafs"
+    tag "${component}"
+
     input:
     set val(component),
         file("component.gfa"),
@@ -245,6 +249,7 @@ process findComponentContigs {
                 unscaffoldedGenomes4FindComponentContigs
                     .map { n, f -> f }
                     .collect()
+                    .toList()
             )
 
     output:
@@ -257,7 +262,7 @@ process findComponentContigs {
       -x lr \
       -N 0 \
       -t "${task.cpus}" \
-      -o "${component}.gaf \
+      -o "${component}.gaf" \
       component.gfa \
       genomes/*.fasta
     """
@@ -270,7 +275,7 @@ process selectBestContigsForComponents {
     label "small_task"
     time "3h"
 
-    publishDir "${params.outdir}"
+    publishDir "${params.outdir}/initial/selected_contigs"
 
     input:
     file "gafs/*" from alignedComponentContigs
@@ -314,7 +319,9 @@ process realignScaffoldsToInitialGraph {
     label "small_task"
     time "1d"
 
-    publishDir "${params.outdir}/initial/aligned"
+    tag "${component}"
+
+    publishDir "${params.outdir}/initial/realigned"
 
     input:
     set val(component),
@@ -333,8 +340,15 @@ process realignScaffoldsToInitialGraph {
 
     script:
     """
+    # MGSA appears to modify this, so checkpointing gets
+    # screwed.
+    cp -L in.vg in.vg.tmp
+
+    mkdir tmp
+    TMPDIR="\${PWD}/tmp"
+
     vg msga \
-      --graph in.vg \
+      --graph in.vg.tmp \
       --from in.fasta \
       --threads "${task.cpus}" \
       --band-multi 128 \
@@ -344,12 +358,15 @@ process realignScaffoldsToInitialGraph {
       --idx-kmer-size 16 \
       --idx-edge-max 3 \
       --idx-doublings 2 \
-      --xdrop-alignment \
       --node-max 32 \
       --hit-max 5 \
       --debug \
       --debug-align \
     > "${component}.vg"
+
+    # --xdrop-alignment
+
+    rm -rf -- tmp
     """
 }
 
