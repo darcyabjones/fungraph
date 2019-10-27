@@ -361,7 +361,6 @@ process realignScaffoldsToInitialGraph {
       --node-max 32 \
       --hit-max 5 \
       --debug \
-      --debug-align \
     > "${component}.vg"
 
     # --xdrop-alignment
