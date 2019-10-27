@@ -95,6 +95,8 @@ preprocessedGenomes.set {
 }
 
 
+/*
+ */
 process unscaffoldGenomes {
 
     label "python3"
@@ -151,6 +153,7 @@ process preprocessCompleteGenomes {
 
 
 preprocessedCompleteGenomes.into {
+    completeGenomes4CombineChannel;
     completeGenomes4AssembleMinigraph;
     completeGenomes4FindComponentContigs;
     completeGenomes4SelectBestContigsForComponents;
@@ -159,6 +162,7 @@ preprocessedCompleteGenomes.into {
 
 
 unscaffoldedGenomes.into {
+    genomes4CombineChannel;
     genomes4AssembleMinigraph;
     genomes4FindComponentContigs;
     genomes4SelectBestContigsForComponents;
@@ -166,13 +170,23 @@ unscaffoldedGenomes.into {
 }
 
 
+completeGenomes4CombineChannel
+    .mix(genomes4CombineChannel)
+    .into {
+    genomes4RealignScaffoldsToRGFAAssembly;
+    genomes4RealignScaffoldsToLinearisedRGFAAssembly;
+}
+
+
+/*
+ */
 process assembleMinigraph {
 
     label "minigraph"
     label "big_task"
     time "1d"
 
-    publishDir "${params.outdir}"
+    publishDir "${params.outdir}/initial"
 
     input:
     set file("genomes/*"),
@@ -191,30 +205,15 @@ process assembleMinigraph {
 
     script:
     """
-    touch order.txt
-    for f in genomes/*
-    do
-      fasta_to_tsv.sh \
-      < "\${f}" \
-      | awk -F '\\t' -v fname="\${f}" '
-          BEGIN {OFS="\\t"; total=0; nseqs=0}
-          {
-            total = total + length(\$2);
-            nseqs++;
-          }
-          END { print fname, total / nseqs }
-        ' \
-      >> order.txt
-    done
-
-    IDS=\$(sort -k2,2nr order.txt | cut -f1 -d'\\t')
+    COMPLETE_ORDER=\$(order_genome_by_average_length.sh complete_genomes/*)
+    ORDER=\$(order_genome_by_average_length.sh genomes/*)
 
     minigraph \
       -x "${params.minigraph_preset}" \
       -t "${task.cpus}" \
       -o pan_minigraph.rgfa \
-      complete_genomes/* \
-      \${IDS}
+      \${COMPLETE_ORDER} \
+      \${ORDER}
 
     # This returns a canonical gfa that can be put into vg and odgi.
     echo -e "H\\tVN:Z:1.0" > pan_minigraph.gfa
@@ -236,15 +235,74 @@ process assembleMinigraph {
 }
 
 
+minigraphRGFAAssembly.into {
+    minigraphRGFAAssembly4RealignScaffoldsToRGFAAssembly;
+    minigraphRGFAAssembly4LineariseRGFAAssembly;
+}
+
+
 /*
  */
+process realignScaffoldsToRGFAAssembly {
+
+    label "minigraph"
+    label "medium_task"
+    time "5h"
+
+    publishDir "${params.outdir}/initial/gafs"
+    tag "${name}"
+
+    input:
+    set val(name),
+        file("genome.fasta"),
+        file("pan.rgfa") from genomes4RealignScaffoldsToRGFAAssembly
+            .combine(minigraphRGFAAssembly4RealignScaffoldsToRGFAAssembly)
+
+    output:
+    set val(name),
+        file("${name}.gaf") into realignedScaffoldsToRGFA
+
+    script:
+    """
+    minigraph \
+      -x lr \
+      -N 0 \
+      -t "${task.cpus}" \
+      -o "${name}.gaf" \
+      pan.rgfa \
+      genomes.fasta
+    """
+}
+
+
+process lineariseRGFAAssembly {
+
+    label "gfatools"
+    label "small_task"
+
+    publishDir "${params.outdir}/initial"
+
+    input:
+    file "pan_minigraph.rgfa" minigraphRGFAAssembly4LineariseRGFAAssembly
+
+    output:
+    file "pan_minigraph.fasta"
+
+    script:
+    """
+    gfatools gfa2fa -s pan_minigraph.rgfa > pan_minigraph.fasta
+    """
+}
+
+
+/*
 process gfa2InitialVG {
 
     label "vg"
     label "medium_task"
     time "5h"
 
-    publishDir "${params.outdir}/initial"
+    publishDir "${params.outdir}/initial/gfas"
 
     input:
     file "pan.gfa" from minigraphAssembly
@@ -277,17 +335,17 @@ process gfa2InitialVG {
         '
     """
 }
+ */
 
 
 /*
- */
 process chopInitialVG {
 
     label "vg"
-    label "medium_task"
+    label "big_task"
     time "5h"
 
-    publishDir "${params.outdir}/initial"
+    publishDir "${params.outdir}/initial/vg"
 
     input:
     file "in" from initialVg
@@ -298,20 +356,26 @@ process chopInitialVG {
     script:
     """
     mkdir -p initial
-    find in -name "*.vg" -printf '%f\\0' \
-    | xargs -0 -P "${task.cpus}" -I {} -- \
-        bash -eu -c 'vg mod -X 32 "in/{}" > "initial/{}"'
+
+    find in/ -name "*.vg" -printf '%f\\0' \
+    | xargs -0 -P 1 -I {} -- \
+        bash -eu -c 'vg mod -X 32 in/{} > initial/{}'
 
     vg ids -s -j initial/*
     """
 }
+ */
 
 
+/*
 process findComponentContigs {
 
     label "minigraph"
     label "medium_task"
     time "5h"
+
+    publishDir "${params.outdir}/initial/gafs"
+    tag "${component}"
 
     input:
     set val(component),
@@ -322,6 +386,7 @@ process findComponentContigs {
                 unscaffoldedGenomes4FindComponentContigs
                     .map { n, f -> f }
                     .collect()
+                    .toList()
             )
 
     output:
@@ -334,20 +399,22 @@ process findComponentContigs {
       -x lr \
       -N 0 \
       -t "${task.cpus}" \
-      -o "${component}.gaf \
+      -o "${component}.gaf" \
       component.gfa \
       genomes/*.fasta
     """
 }
+ */
 
 
+/*
 process selectBestContigsForComponents {
 
     label "python3"
     label "small_task"
     time "3h"
 
-    publishDir "${params.outdir}"
+    publishDir "${params.outdir}/initial/selected_contigs"
 
     input:
     file "gafs/*" from alignedComponentContigs
@@ -380,18 +447,20 @@ process selectBestContigsForComponents {
     rm combined.fasta
     """
 }
+*/
 
 
 /*
  * It might be better to do this as an MGSA?
- */
 process realignScaffoldsToInitialGraph {
 
     label "vg"
     label "small_task"
     time "1d"
 
-    publishDir "${params.outdir}/initial/aligned"
+    tag "${component}"
+
+    publishDir "${params.outdir}/initial/realigned"
 
     input:
     set val(component),
@@ -410,8 +479,15 @@ process realignScaffoldsToInitialGraph {
 
     script:
     """
+    # MGSA appears to modify this, so checkpointing gets
+    # screwed.
+    cp -L in.vg in.vg.tmp
+
+    mkdir tmp
+    TMPDIR="\${PWD}/tmp"
+
     vg msga \
-      --graph in.vg \
+      --graph in.vg.tmp \
       --from in.fasta \
       --threads "${task.cpus}" \
       --band-multi 128 \
@@ -421,14 +497,17 @@ process realignScaffoldsToInitialGraph {
       --idx-kmer-size 16 \
       --idx-edge-max 3 \
       --idx-doublings 2 \
-      --xdrop-alignment \
       --node-max 32 \
       --hit-max 5 \
       --debug \
-      --debug-align \
     > "${component}.vg"
+
+    # --xdrop-alignment
+
+    rm -rf -- tmp
     """
 }
+ */
 
 
 /*
@@ -608,7 +687,7 @@ process callMinimapVariants {
     mkdir -p tmp
     minimap2 -cx asm20 -t${task.cpus} --cs pan.fasta genome.fasta \
     | sort -k6,6 -k8,8n --temporary-directory=tmp \
-    > "${name}_minimap2.paf" 
+    > "${name}_minimap2.paf"
 
     paftools.js call \
       -l 1000 \
