@@ -25,6 +25,7 @@ if (params.help) {
 
 
 params.genomes = false
+params.complete_genomes = false
 params.minigraph_preset = "ggs"
 params.max_ns = 50
 params.min_contig = 1000
@@ -37,6 +38,21 @@ if ( params.genomes ) {
 } else {
     log.error "Please provide some genomes."
     exit 1
+}
+
+if ( params.complete_genomes ) {
+    Channel
+        .fromPath(params.complete_genomes, checkIfExists: true, type: "file")
+        .map { g -> [g.simpleName, g] }
+        .set { completeGenomes }
+} else {
+    completeGenomes = Channel.empty()
+}
+
+
+completeGenomes.into {
+    completeGenomes4PreprocessGenomes;
+    completeGenomes4CallMinimapVariants;
 }
 
 
@@ -106,11 +122,47 @@ process unscaffoldGenomes {
 }
 
 
-unscaffoldedGenomes.set {
-    unscaffoldGenomes4AssembleMinigraph;
-    unscaffoldedGenomes4FindComponentContigs;
-    unscaffoldedGenomes4SelectBestContigsForComponents;
-    unscaffoldedGenomes4RealignScaffoldsToGraph;
+/*
+ * Add the genome name to the beginning of each sequence.
+ */
+process preprocessCompleteGenomes {
+
+    label "posix"
+    label "small_task"
+    time "1h"
+
+    tag "${name}"
+
+    input:
+    set val(name), file("in.fasta") from completeGenomes4PreprocessGenomes
+
+    output:
+    set val(name), file("out.fasta") into preprocessedCompleteGenomes
+
+    script:
+    """
+    awk -v name="${name}" '
+        /^>/ { print ">" name "." substr(\$1, 2) }
+        \$0 !~ />/ { print toupper(\$0) }
+    ' in.fasta \
+    > "out.fasta"
+    """
+}
+
+
+preprocessedCompleteGenomes.into {
+    completeGenomes4AssembleMinigraph;
+    completeGenomes4FindComponentContigs;
+    completeGenomes4SelectBestContigsForComponents;
+    completeGenomes4RealignScaffoldsToGraph;
+}
+
+
+unscaffoldedGenomes.into {
+    genomes4AssembleMinigraph;
+    genomes4FindComponentContigs;
+    genomes4SelectBestContigsForComponents;
+    genomes4RealignScaffoldsToGraph;
 }
 
 
@@ -123,21 +175,46 @@ process assembleMinigraph {
     publishDir "${params.outdir}"
 
     input:
-    file "genomes/*" from unscaffoldGenomes4AssembleMinigraph
-        .map { n, f -> f }
-        .collect()
+    set file("genomes/*"),
+        file("complete_genomes/*") from genomes4AssembleMinigraph
+            .map { n, f -> f }
+            .collect()
+            .combine(
+                completeGenomes4AssembleMinigraph
+                    .map { n, f -> f }
+                    .collect()
+            )
 
     output:
     file "pan_minigraph.gfa" into minigraphAssembly
-    file "pan_minigraph.rgfa" into minigraphAssembly
+    file "pan_minigraph.rgfa" into minigraphRGFAAssembly
 
     script:
     """
+    touch order.txt
+    for f in genomes/*
+    do
+      fasta_to_tsv.sh \
+      < "\${f}" \
+      | awk -F '\\t' -v fname="\${f}" '
+          BEGIN {OFS="\\t"; total=0; nseqs=0}
+          {
+            total = total + length(\$2);
+            nseqs++;
+          }
+          END { print fname, total / nseqs }
+        ' \
+      >> order.txt
+    done
+
+    IDS=\$(sort -k2,2nr order.txt | cut -f1 -d'\\t')
+
     minigraph \
       -x "${params.minigraph_preset}" \
       -t "${task.cpus}" \
       -o pan_minigraph.rgfa \
-      genomes/*
+      complete_genomes/* \
+      \${IDS}
 
     # This returns a canonical gfa that can be put into vg and odgi.
     echo -e "H\\tVN:Z:1.0" > pan_minigraph.gfa
