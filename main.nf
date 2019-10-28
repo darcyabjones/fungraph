@@ -30,14 +30,18 @@ params.minigraph_preset = "ggs"
 params.max_ns = 50
 params.min_contig = 1000
 
+if ( !(params.genomes || params.complete_genomes) ) {
+    log.error "Please provide some genomes."
+    exit 1
+}
+
 if ( params.genomes ) {
     Channel
         .fromPath(params.genomes, checkIfExists: true, type: "file")
         .map { g -> [g.simpleName, g] }
         .set { genomes }
 } else {
-    log.error "Please provide some genomes."
-    exit 1
+    genomes = Channel.empty()
 }
 
 if ( params.complete_genomes ) {
@@ -48,7 +52,6 @@ if ( params.complete_genomes ) {
 } else {
     completeGenomes = Channel.empty()
 }
-
 
 completeGenomes.into {
     completeGenomes4PreprocessGenomes;
@@ -299,6 +302,7 @@ process lineariseRGFAAssembly {
 
 
 /*
+ */
 process gfa2InitialVG {
 
     label "vg"
@@ -328,7 +332,6 @@ process gfa2InitialVG {
     rm -f pan_first.vg
     """
 }
- */
 
 
 /*
