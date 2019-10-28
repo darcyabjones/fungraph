@@ -158,26 +158,21 @@ process preprocessCompleteGenomes {
 preprocessedCompleteGenomes.into {
     completeGenomes4CombineChannel;
     completeGenomes4AssembleMinigraph;
-    completeGenomes4FindComponentContigs;
-    completeGenomes4SelectBestContigsForComponents;
-    completeGenomes4RealignScaffoldsToGraph;
 }
 
 
 unscaffoldedGenomes.into {
     genomes4CombineChannel;
     genomes4AssembleMinigraph;
-    genomes4FindComponentContigs;
-    genomes4SelectBestContigsForComponents;
-    genomes4RealignScaffoldsToGraph;
 }
 
 
 completeGenomes4CombineChannel
-    .mix(genomes4CombineChannel)
+    .concat(genomes4CombineChannel)
     .into {
-    genomes4RealignScaffoldsToRGFAAssembly;
-    genomes4RealignScaffoldsToLinearisedRGFAAssembly;
+        genomes4RealignScaffoldsToRGFAAssembly;
+        genomes4RealignScaffoldsToLinearisedRGFAAssembly;
+        genomes4RealignScaffoldsToGraph;
 }
 
 
@@ -335,219 +330,146 @@ process gfa2InitialVG {
 
 
 /*
-process indexInitialVG {
+ * We are aligning each genome to the graph and updating
+ * the graph before aligning the next one.
+ * To do this I add a cycle.
+ */
+realignmentAccumulator = Channel.create()
+
+/*
+ * Compute the indices needed to align against the genome.
+ */
+process indexRealignedVG {
 
     label "vg"
     label "biggish_task"
     time "12h"
 
-    publishDir "${params.outdir}"
-
     tag "${component}"
 
+    // This will be overwritten at each iteration
+    publishDir "${params.outdir}/realigned"
+
     input:
-    file "input.vg" from initialVg
+    file "realigned.vg" initialVg.mix(realignmentAccumulator)
 
     output:
-    set file("${component}.xg") into explodedInitialXG
+    set file("realigned.vg"),
+        file("realigned.xg"),
+        file("realigned.gcsa") into indexedRealignmentAccumulator
+
+    // This is where the output will go.
+    set file("realigned.vg"),
+        file("realigned.xg"),
+        file("realigned.gcsa") into finalRealignedGraph
 
     script:
     """
-    mkdir tmp
+    mkdir -p tmp
     TMPDIR="\${PWD}/tmp"
+
     vg index \
-      -x "${component}.xg" \
+      -x "output.xg" \
       --temp-dir ./tmp \
       --threads "${task.cpus}" \
-      input.vg
+      realigned.vg
 
-    vg mod -M 32 input.vg > simplified.vg
+    vg mod -M 32 realigned.vg > simplified.vg
 
     vg prune \
       -u simplified.vg \
       -m node_mapping \
       --threads "${task.cpus}" \
-    > pruned.vg
-
-    rm -rf -- tmp
-
-    rm -f simplified.vg
-    """
-}
- */
-
-
-/*
-process alignGenomesToInitialVG {
-
-    label "vg"
-    label "big_task"
-
-    input:
-
-    output:
-
-    script:
-    """
-    """
-
-}
- */
-
-
-/*
-process addPathsToInitialGraph {
-
-    label "vg"
-    label "small_task"
-    time "1d"
-
-    publishDir "${params.outdir}/with_paths"
-
-    tag "${component}"
-
-    input:
-    set val(component),
-        file("component.vg"),
-        file("component.xg"),
-        file("component.gcsa"),
-        file("gams/*.gam") from realignedScaffoldsToInitialGraph
-            .map { c, n, g -> [c, g] }
-            .groupTuple(by: 0)
-
-    output:
-
-    script:
-    """
-    cat gams/*.gam > single.gam
-
-    vg augment \
-      --include-paths \
-      --cut-softclips \
-      component.vg \
-      single.gam \
-    > tmp.vg
-
-    vg mod \
-      --remove-non-path \
-      --X 32 \
-      --threads "${task.cpus}" \
-      tmp.vg \
-    > "${component}_with_paths.vg"
-
-    rm -f single.gam tmp.vg
-    """
-}
- */
-
-
-/*
-process getInitialXG {
-
-    label "vg"
-    label "biggish_task"
-    time "12h"
-
-    publishDir "${params.outdir}/initial"
-
-    tag "${component}"
-
-    input:
-    set val(component),
-        file("input.vg") from explodedInitialVg4GetInitialVGXG
-
-    output:
-    set val(component),
-        file("${component}.xg") into explodedInitialXG
-
-    script:
-    """
-    mkdir tmp
-    TMPDIR="\${PWD}/tmp"
-    vg index \
-      -x "${component}.xg" \
-      --temp-dir ./tmp \
-      --threads "${task.cpus}" \
-      input.vg
-
-    rm -rf -- tmp
-    """
-}
- */
-
-
-/*
-process pruneInitialVG {
-
-    label "vg"
-    label "big_task"
-    time "1d"
-
-    tag "${component}"
-
-    input:
-    set val(component),
-        file("input.vg") from explodedInitialVg4PruneInitialVG
-
-    output:
-    set val(component),
-        file("pruned.vg"),
-        file("node_mapping") into explodedInitialPrunedVg
-
-    script:
-    """
-    vg mod -M 32 input.vg > simplified.vg
-
-    vg prune \
-      -u simplified.vg \
-      -m node_mapping \
-      --threads "${task.cpus}" \
-    > pruned.vg
-
-    rm -f simplified.vg
-    """
-}
- */
-
-
-/*
-process getInitialVGGCSA {
-
-    label "vg"
-    label "big_task"
-    time "1d"
-
-    publishDir "${params.outdir}/initial"
-
-    tag "${component}"
-
-    input:
-    set val(component),
-        file("pruned.vg"),
-        file("node_mapping") from explodedInitialPrunedVg
-
-    output:
-    set val(component),
-        val("${component}.gcsa") into explodedInitialGCSA
-
-    script:
-    """
-    mkdir tmp
-    TMPDIR="\${PWD}/tmp"
+    > extra_simplified.vg
 
     vg index \
-      -g initial.gcsa \
+      -g realigned.gcsa \
       -f node_mapping \
       --temp-dir ./tmp \
       --threads "${task.cpus}" \
       --progress \
-      pruned.vg
+      extra_simplified.vg
 
     rm -rf -- tmp
+    rm -f simplified.vg extra_simplified.vg node_mapping
     """
 }
- */
 
+
+/*
+ * Take the updated indexed graph and align the genome to it, keeping
+ * only the best alignments.
+ */
+process realignScaffoldsToGraph {
+
+    label "vg"
+    label "big_task"
+    time "12h"
+
+    input:
+    set val(name),
+        file("genome.fasta"),
+        file("input.vg"),
+        file("input.xg"),
+        file("input.gcsa") from genomes4RealignScaffoldsToGraph
+            .merge(indexedRealignmentAccumulator)
+
+    output:
+    // This feeds back into the accumulator, to be re-indexed.
+    file "output.vg" into realignmentAccumulator
+
+    script:
+    """
+    vg align \
+      -x in.xg \
+      -g in.gcsa \
+      --fasta genome.fasta \
+      --threads "${task.cpus}" \
+      --hit-max 500 \
+      --band-multi 128 \
+      --xdrop-alignment \
+      --alignment-model long \
+      --max-multimaps 1 \
+      --debug \
+    > out.gam
+
+    vg augment \
+      --include-paths \
+      --cut-softclips \
+      input.vg \
+      out.gam \
+    > augmented.vg
+
+    vg mod -X 32 augmented.vg > output.vg
+
+    rm -f out.gam augmented.vg
+    """
+}
+
+
+/*
+ * This is just to split connected components.
+ */
+process explodeRealignedGraph {
+
+    label "vg"
+    label "small_task"
+
+    publishDir "${params.outdir}/realigned"
+
+    input:
+    set file("realigned.vg"),
+        file("realigned.xg"),
+        file("realigned.gcsa") from finalRealignedGraph.last()
+
+    output:
+    file "exploded"
+
+    script:
+    """
+    vg explode realigned.vg exploded
+    """
+}
 
 
 /*
