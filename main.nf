@@ -173,7 +173,7 @@ completeGenomes4CombineChannel
         genomes4RealignScaffoldsToRGFAAssembly;
         genomes4RealignScaffoldsToLinearisedRGFAAssembly;
         genomes4RealignScaffoldsToGraph;
-}
+    }
 
 
 /*
@@ -187,18 +187,24 @@ process assembleMinigraph {
     publishDir "${params.outdir}/initial"
 
     input:
+    // This garbage is all needed to so that the two channels are merged
+    // even if one is empty.
     set file("genomes/*"),
         file("complete_genomes/*") from genomes4AssembleMinigraph
             .map { n, f -> f }
             .collect()
+            .ifEmpty([])
             .toList()
-            .combine(
+            .merge(
                 completeGenomes4AssembleMinigraph
                     .map { n, f -> f }
                     .collect()
+                    .ifEmpty([])
                     .toList()
             )
             .collect()
+
+
 
     output:
     file "pan_minigraph.gfa" into minigraphAssembly
@@ -206,8 +212,20 @@ process assembleMinigraph {
 
     script:
     """
-    COMPLETE_ORDER=\$(order_genome_by_average_length.sh complete_genomes/*)
-    ORDER=\$(order_genome_by_average_length.sh genomes/*)
+    if [ -d complete_genomes ]
+    then
+      COMPLETE_ORDER=\$(order_genome_by_average_length.sh complete_genomes/*)
+    else
+      COMPLETE_ORDER=""
+    fi
+
+    if [ -d genomes ]
+    then
+      ORDER=\$(order_genome_by_average_length.sh genomes/*)
+    else
+      ORDER=""
+    fi
+
 
     minigraph \
       -x "${params.minigraph_preset}" \
@@ -345,23 +363,23 @@ process indexRealignedVG {
     label "biggish_task"
     time "12h"
 
-    tag "${component}"
-
     // This will be overwritten at each iteration
     publishDir "${params.outdir}/realigned"
 
     input:
-    file "realigned.vg" initialVg.mix(realignmentAccumulator)
+    file "realigned.vg" from initialVg.mix(realignmentAccumulator)
 
     output:
     set file("realigned.vg"),
         file("realigned.xg"),
-        file("realigned.gcsa") into indexedRealignmentAccumulator
+        file("realigned.gcsa"),
+        file("realigned.gcsa.lcp") into indexedRealignmentAccumulator
 
     // This is where the output will go.
     set file("realigned.vg"),
         file("realigned.xg"),
-        file("realigned.gcsa") into finalRealignedGraph
+        file("realigned.gcsa"),
+        file("realigned.gcsa.lcp") into finalRealignedGraph
 
     script:
     """
@@ -369,7 +387,7 @@ process indexRealignedVG {
     TMPDIR="\${PWD}/tmp"
 
     vg index \
-      -x "output.xg" \
+      -x "realigned.xg" \
       --temp-dir ./tmp \
       --threads "${task.cpus}" \
       realigned.vg
@@ -388,6 +406,8 @@ process indexRealignedVG {
       --temp-dir ./tmp \
       --threads "${task.cpus}" \
       --progress \
+      --kmer-size 16 \
+      --doubling-steps 2 \
       extra_simplified.vg
 
     rm -rf -- tmp
@@ -406,12 +426,15 @@ process realignScaffoldsToGraph {
     label "big_task"
     time "12h"
 
+    tag "${name}"
+
     input:
     set val(name),
         file("genome.fasta"),
         file("input.vg"),
         file("input.xg"),
-        file("input.gcsa") from genomes4RealignScaffoldsToGraph
+        file("input.gcsa"),
+        file("input.gcsa.lcp") from genomes4RealignScaffoldsToGraph
             .merge(indexedRealignmentAccumulator)
 
     output:
@@ -420,17 +443,15 @@ process realignScaffoldsToGraph {
 
     script:
     """
-    vg align \
-      -x in.xg \
-      -g in.gcsa \
+    vg map \
+      -x input.xg \
+      -g input.gcsa \
       --fasta genome.fasta \
       --threads "${task.cpus}" \
       --hit-max 500 \
       --band-multi 128 \
-      --xdrop-alignment \
       --alignment-model long \
       --max-multimaps 1 \
-      --debug \
     > out.gam
 
     vg augment \
