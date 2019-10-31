@@ -171,7 +171,8 @@ completeGenomes4CombineChannel
     .concat(genomes4CombineChannel)
     .into {
         genomes4RealignScaffoldsToRGFAAssembly;
-        genomes4RealignScaffoldsToLinearisedRGFAAssembly;
+        genomes4FindComponentContigsAlign;
+        genomes4SelectBestContigsForComponents;
         genomes4RealignScaffoldsToGraph;
     }
 
@@ -209,6 +210,7 @@ process assembleMinigraph {
     output:
     file "pan_minigraph.gfa" into minigraphAssembly
     file "pan_minigraph.rgfa" into minigraphRGFAAssembly
+    file "genome_order.tsv" into genomeOrder
 
     script:
     """
@@ -226,6 +228,16 @@ process assembleMinigraph {
       ORDER=""
     fi
 
+    ORDER_ARR_FILES=\${COMPLETE_ORDER} \${ORDER}
+
+    i=0
+    touch genome_order.tsv
+    for n in \${ORDER_ARR_FILES}
+    do
+      NAME=\$(basename \${n%.*})
+      echo -e "\${NAME}\\t\${i}" >> genome_order.tsv 
+      i=\$(( i+1 ))
+    done
 
     minigraph \
       -x "${params.minigraph_preset}" \
@@ -272,8 +284,7 @@ process gfa2InitialComponentVG {
     file "pan.gfa" from minigraphAssembly
 
     output:
-    file "initial" into initialComponentVgs
-    file "gfas/*" into initialGfas mode flatten
+    file "initial/*" into initialComponentVgs mode flatten
 
     script:
     // Parallelisation is limited for this step.
@@ -306,6 +317,8 @@ process getInitialComponentGFAs {
     label "small_task"
     time "2h"
 
+    tag "${component}"
+
     publishDir "${params.outdir}/initial/component_gfas"
 
     input:
@@ -329,6 +342,8 @@ process findComponentContigsAlign {
     label "medium_task"
     time "5h"
 
+    tag "${component}"
+
     publishDir "${params.outdir}/initial/component_gafs"
 
     input:
@@ -336,9 +351,10 @@ process findComponentContigsAlign {
         file("component.gfa"),
         file("genomes/*.fasta") from initialComponentGFAs
             .combine(
-                unscaffoldedGenomes4FindComponentContigs
+                genomes4FindComponentContigsAlign
                     .map { n, f -> f }
                     .collect()
+                    .toList()
             )
 
     output:
@@ -351,7 +367,7 @@ process findComponentContigsAlign {
       -x lr \
       -N 0 \
       -t "${task.cpus}" \
-      -o "${component}.gaf \
+      -o "${component}.gaf" \
       component.gfa \
       genomes/*.fasta
     """
@@ -371,14 +387,14 @@ process selectBestContigsForComponents {
     input:
     set val(name),
         file("in.fasta"),
-        file("gafs/*") from unscaffoldedGenomes4SelectBestContigsForComponents
-            .combine(alignedComponentContigs.map { c, g -> g }.collect())
+        file("gafs/*") from genomes4SelectBestContigsForComponents
+            .combine(alignedComponentContigs.map { c, g -> g }.collect().toList())
 
     output:
     set val(name),
         file("fasta_components_${name}/*.fasta") into bestContigsForComponents mode flatten
 
-    set val(name), file("unplaced_${name}.fasta") into unplacedContigsForComponents
+    set val(name), file("unplaced_${name}.fasta") into unplacedContigsForComponents optional true
 
     file "contigs_to_components_${name}.tsv"
 
@@ -389,20 +405,36 @@ process selectBestContigsForComponents {
       --outfile "contigs_to_components_${name}.tsv" \
       gafs/*
 
-    cat fastas/* > combined.fasta
 
     mkdir -p "fasta_components_${name}"
 
     select_sequences.py \
       --outdir "fasta_components_${name}" \
       "contigs_to_components_${name}.tsv" \
-      combined.fasta
+      in.fasta
 
-    mv "fasta_components_${name}/unplaced.fasta" "unplaced_${name}.fasta"
-
-    rm combined.fasta
+    if [ -s "fasta_components_${name}/unplaced.fasta" ]
+    then
+      mv "fasta_components_${name}/unplaced.fasta" "unplaced_${name}.fasta"
+    fi
     """
 }
+
+
+// This sorts the channel so that contigs are in the same order that the
+// original minigraph assembly was in.
+// This does three things, 1 we get the major contributors to the graph first.
+// and 2 we align the more contiguous assemblies first, which should help with
+// the alignments via paths. and 3 maintains the order between runs so checkpointing
+// is preserved.
+bestContigsForComponents
+    .map { n, c -> [n, c.baseName, c] }
+    .combine(genomeOrder.splitCsv(sep: "\t"), by: 0)
+    .toSortedList( { a, b -> a[3] <=> b[3] } )
+    .flatMap { li -> li.collect { n, c, f, o -> [c, n, f] } }
+    .set { sortedBestContigsForComponents }
+  
+
 
 // The component filename will match the component label.
 
@@ -420,17 +452,15 @@ process realignScaffoldsToInitialGraph {
     label "small_task"
     time "1d"
 
+    tag "${component} - ${name}"
+
     input:
     set val(component),
         file("in.vg"),
         val(name),
         file("in.fasta") from initialComponentVgs4RealignScaffoldsToInitialGraph
             .mix(realignmentAccumulator)
-            .join(
-                bestContigsForComponents
-                    .map { n, c -> [c.baseName, n, c] }
-                by: 0
-            )
+            .join(sortedBestContigsForComponents, by: 0)
 
     output:
     set val(component),
@@ -441,28 +471,30 @@ process realignScaffoldsToInitialGraph {
 
     script:
     """
+    mkdir -p tmp
+    TMPDIR="\${PWD}/tmp"
+
+    vg mod -X 512 in.vg > chopped.vg
+
     vg msga \
-      --graph in.vg \
+      --graph chopped.vg \
       --from in.fasta \
       --threads "${task.cpus}" \
       --band-multi 128 \
       --try-at-least 1 \
-      --match 1 \
-      --mismatch 9 \
-      --gap-open 16,41 \
-      --gap-extend 2,1\
       --hit-max 500 \
-      --max-multimaps 0 \
+      --max-multimaps 1 \
       --idx-kmer-size 16 \
       --idx-edge-max 3 \
-      --idx-doublings 2 \
-      --xdrop-alignment \
-      --full-l-bonus 32 \
-      --node-max 32 \
-      --hit-max 5 \
-      --normalize \
+      --idx-doublings 3 \
+      --node-max 512 \
       --debug \
-    > "out.vg"
+    > msga.vg
+
+    vg mod -u -n -U 10 msga.vg > out.vg
+
+    rm -f chopped.vg msga.vg
+    rm -rf -- tmp
     """
 }
 
@@ -767,7 +799,7 @@ process realignScaffoldsToGraph {
 //       -i pan.dg \
 //       -x 4000 \
 //       -y 800 \
-//       -L 0 \
+//       -L 0.5 \
 //       -A=SN15 \
 //       --show-strand \
 //       -X 1 \
