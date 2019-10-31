@@ -262,73 +262,18 @@ minigraphRGFAAssembly.into {
 
 /*
  */
-process realignScaffoldsToRGFAAssembly {
-
-    label "minigraph"
-    label "medium_task"
-    time "5h"
-
-    publishDir "${params.outdir}/initial/gafs"
-    tag "${name}"
-
-    input:
-    set val(name),
-        file("genome.fasta"),
-        file("pan.rgfa") from genomes4RealignScaffoldsToRGFAAssembly
-            .combine(minigraphRGFAAssembly4RealignScaffoldsToRGFAAssembly)
-
-    output:
-    set val(name),
-        file("${name}.gaf") into realignedScaffoldsToRGFA
-
-    script:
-    """
-    minigraph \
-      -x lr \
-      -N 0 \
-      -t "${task.cpus}" \
-      -o "${name}.gaf" \
-      pan.rgfa \
-      genome.fasta
-    """
-}
-
-
-process lineariseRGFAAssembly {
-
-    label "gfatools"
-    label "small_task"
-
-    publishDir "${params.outdir}/initial"
-
-    input:
-    file "pan_minigraph.rgfa" from minigraphRGFAAssembly4LineariseRGFAAssembly
-
-    output:
-    file "pan_minigraph.fasta"
-
-    script:
-    """
-    gfatools gfa2fa -s pan_minigraph.rgfa > pan_minigraph.fasta
-    """
-}
-
-
-/*
- */
-process gfa2InitialVG {
+process gfa2InitialComponentVG {
 
     label "vg"
     label "medium_task"
     time "5h"
 
-    publishDir "${params.outdir}/initial"
-
     input:
     file "pan.gfa" from minigraphAssembly
 
     output:
-    file "pan.vg" into initialVg
+    file "initial" into initialComponentVgs
+    file "gfas/*" into initialGfas mode flatten
 
     script:
     // Parallelisation is limited for this step.
@@ -337,15 +282,129 @@ process gfa2InitialVG {
       --vg \
       --gfa-in pan.gfa \
       --threads "${task.cpus}" \
-    > pan_first.vg
+    > pan.vg
 
-    vg mod -X 32 pan_first.vg > pan.vg
-    vg ids -s -j pan.vg
-
-    rm -f pan_first.vg
+    vg explode \
+      --threads "${task.cpus}" \
+      pan.vg \
+      initial
     """
 }
 
+
+initialComponentVgs
+    .map { v -> [v.baseName, v] }
+    .into {
+        initialComponentVgs4GetInitialComponentGFAs;
+        initialComponentVgs4RealignScaffoldsToInitialGraph;
+    }
+
+
+process getInitialComponentGFAs {
+
+    label "vg"
+    label "small_task"
+    time "2h"
+
+    publishDir "${params.outdir}/initial/component_gfas"
+
+    input:
+    set val(component),
+        file("component.vg") from initialComponentVgs4GetInitialComponentGFAs
+
+    output:
+    set val(component),
+        file("${component}.gfa") into initialComponentGFAs
+
+    script:
+    """
+    vg view --vg-in --gfa "component.vg" > "${component}.gfa"
+    """
+}
+
+
+process findComponentContigsAlign {
+
+    label "minigraph"
+    label "medium_task"
+    time "5h"
+
+    publishDir "${params.outdir}/initial/component_gafs"
+
+    input:
+    set val(component),
+        file("component.gfa"),
+        file("genomes/*.fasta") from initialComponentGFAs
+            .combine(
+                unscaffoldedGenomes4FindComponentContigs
+                    .map { n, f -> f }
+                    .collect()
+            )
+
+    output:
+    set val(component),
+        file("${component}.gaf") into alignedComponentContigs
+
+    script:
+    """
+    minigraph \
+      -x lr \
+      -N 0 \
+      -t "${task.cpus}" \
+      -o "${component}.gaf \
+      component.gfa \
+      genomes/*.fasta
+    """
+}
+
+
+process selectBestContigsForComponents {
+
+    label "python3"
+    label "small_task"
+    time "3h"
+
+    tag "${name}"
+
+    publishDir "${params.outdir}/initial"
+
+    input:
+    set val(name),
+        file("in.fasta"),
+        file("gafs/*") from unscaffoldedGenomes4SelectBestContigsForComponents
+            .combine(alignedComponentContigs.map { c, g -> g }.collect())
+
+    output:
+    set val(name),
+        file("fasta_components_${name}/*.fasta") into bestContigsForComponents mode flatten
+
+    set val(name), file("unplaced_${name}.fasta") into unplacedContigsForComponents
+
+    file "contigs_to_components_${name}.tsv"
+
+    script:
+    """
+    select_best_contigs_for_components.py \
+      --min-coverage 0.7 \
+      --outfile "contigs_to_components_${name}.tsv" \
+      gafs/*
+
+    cat fastas/* > combined.fasta
+
+    mkdir -p "fasta_components_${name}"
+
+    select_sequences.py \
+      --outdir "fasta_components_${name}" \
+      "contigs_to_components_${name}.tsv" \
+      combined.fasta
+
+    mv "fasta_components_${name}/unplaced.fasta" "unplaced_${name}.fasta"
+
+    rm combined.fasta
+    """
+}
+
+// The component filename will match the component label.
 
 /*
  * We are aligning each genome to the graph and updating
@@ -354,9 +413,62 @@ process gfa2InitialVG {
  */
 realignmentAccumulator = Channel.create()
 
+
+process realignScaffoldsToInitialGraph {
+
+    label "vg"
+    label "small_task"
+    time "1d"
+
+    input:
+    set val(component),
+        file("in.vg"),
+        val(name),
+        file("in.fasta") from initialComponentVgs4RealignScaffoldsToInitialGraph
+            .mix(realignmentAccumulator)
+            .join(
+                bestContigsForComponents
+                    .map { n, c -> [c.baseName, n, c] }
+                by: 0
+            )
+
+    output:
+    set val(component),
+        file("out.vg") into realignmentAccumulator
+
+    set val(component),
+        file("out.vg") into realignmentFinal
+
+    script:
+    """
+    vg msga \
+      --graph in.vg \
+      --from in.fasta \
+      --threads "${task.cpus}" \
+      --band-multi 128 \
+      --try-at-least 1 \
+      --match 1 \
+      --mismatch 9 \
+      --gap-open 16,41 \
+      --gap-extend 2,1\
+      --hit-max 500 \
+      --max-multimaps 0 \
+      --idx-kmer-size 16 \
+      --idx-edge-max 3 \
+      --idx-doublings 2 \
+      --xdrop-alignment \
+      --full-l-bonus 32 \
+      --node-max 32 \
+      --hit-max 5 \
+      --normalize \
+      --debug \
+    > "out.vg"
+    """
+}
+
+
 /*
  * Compute the indices needed to align against the genome.
- */
 process indexRealignedVG {
 
     label "vg"
@@ -414,12 +526,12 @@ process indexRealignedVG {
     rm -f simplified.vg extra_simplified.vg node_mapping
     """
 }
+ */
 
 
 /*
  * Take the updated indexed graph and align the genome to it, keeping
  * only the best alignments.
- */
 process realignScaffoldsToGraph {
 
     label "vg"
@@ -466,71 +578,7 @@ process realignScaffoldsToGraph {
     rm -f out.gam augmented.vg
     """
 }
-
-
-/*
- * This is just to split connected components.
  */
-process explodeRealignedGraph {
-
-    label "vg"
-    label "small_task"
-
-    publishDir "${params.outdir}/realigned"
-
-    input:
-    set file("realigned.vg"),
-        file("realigned.xg"),
-        file("realigned.gcsa") from finalRealignedGraph.last()
-
-    output:
-    file "exploded"
-
-    script:
-    """
-    vg explode realigned.vg exploded
-    """
-}
-
-
-/*
-process callMinimapVariants {
-
-    label "minimap2"
-    label "medium_task"
-    time "4h"
-
-    publishDir "${params.outdir}/paf_call"
-
-    input:
-    file "pan.fasta" from panFasta
-    set val(name), file("genome.fasta") from genomes4CallMinimapVariants
-
-    output:
-    file "${name}_minimap2.paf"
-    file "${name}_minimap2.var"
-
-    script:
-    """
-    mkdir -p tmp
-    minimap2 -cx asm20 -t${task.cpus} --cs pan.fasta genome.fasta \
-    | sort -k6,6 -k8,8n --temporary-directory=tmp \
-    > "${name}_minimap2.paf"
-
-    paftools.js call \
-      -l 1000 \
-      -L 10000 \
-      -f pan.fasta \
-      -s "${name}" \
-      "${name}_minimap2.paf" \
-    > "${name}_minimap2.var"
-
-    rm -rf -- tmp
-    """
-}
-*/
-
-
 
 
 // /*
