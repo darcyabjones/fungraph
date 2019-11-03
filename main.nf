@@ -427,13 +427,20 @@ process selectBestContigsForComponents {
 // and 2 we align the more contiguous assemblies first, which should help with
 // the alignments via paths. and 3 maintains the order between runs so checkpointing
 // is preserved.
+genomeOrder
+    .splitCsv(sep: "\t")
+    .tap { genomeOrder4BestContigsForComponents }
+    .max { it[1] }
+    .map { name, index -> name }
+    .set { lastGenomeName }
+
+
 bestContigsForComponents
     .map { n, c -> [n, c.baseName, c] }
-    .combine(genomeOrder.splitCsv(sep: "\t"), by: 0)
+    .combine(genomeOrder4BestContigsForComponents, by: 0)
     .toSortedList( { a, b -> a[3] <=> b[3] } )
     .flatMap { li -> li.collect { n, c, f, o -> [c, n, f] } }
     .set { sortedBestContigsForComponents }
-  
 
 
 // The component filename will match the component label.
@@ -445,12 +452,12 @@ bestContigsForComponents
  */
 realignmentAccumulator = Channel.create()
 
-
 process realignScaffoldsToInitialGraph {
 
     label "vg"
     label "small_task"
     time "1d"
+
 
     tag "${component} - ${name}"
 
@@ -459,15 +466,13 @@ process realignScaffoldsToInitialGraph {
         file("in.vg"),
         val(name),
         file("in.fasta") from initialComponentVgs4RealignScaffoldsToInitialGraph
-            .mix(realignmentAccumulator)
+            .mix(realignmentAccumulator.map { c, n, v, f -> [c, v] })
             .join(sortedBestContigsForComponents, by: 0)
 
     output:
     set val(component),
-        file("out.vg") into realignmentAccumulator
-
-    set val(component),
-        file("out.vg") into realignmentFinal
+        val(name),
+        file("out.vg") into realignedScaffoldsToInitialGraph
 
     script:
     """
@@ -491,12 +496,76 @@ process realignScaffoldsToInitialGraph {
       --debug \
     > msga.vg
 
-    vg mod -u -n -U 10 msga.vg > out.vg
-
-    rm -f chopped.vg msga.vg
+    vg mod --unchop msga.vg > "out.vg"
+    # rm -f msga.vg
     rm -rf -- tmp
     """
 }
+
+realignmentFinal = Channel.create()
+
+realignedScaffoldsToInitialGraph
+   .combine(lastGenomeName)
+    .choice( realignmentFinal, realignmentAccumulator ) { it[1] == it[3] ? 0 : 1 }
+
+
+// Keeping the recursive channel separated by processes seems
+// to be important for closing the channel.
+process normaliseRealignedScaffolds {
+
+    label "vg"
+    label "small_task"
+    time "4h"
+
+    publishDir "${params.outdir}/realigned"
+    tag "${component}"
+
+    input:
+    set val(component),
+        file("in.vg") from realignmentFinal
+            .map { c, n, v, f -> [c, v] }
+
+    output:
+    set val(component),
+        file("${component}.vg") into realignedComponents
+
+    script:
+    """
+    vg mod --remove-non-path in.vg \
+    | vg mod \
+      --unchop \
+      - \
+    | vg mod --until-normal 10 - \
+    | vg mod --compact-ids - \
+    > "${component}.vg"
+    """
+}
+
+
+process getComponentGFAs {
+
+    label "vg"
+    label "small_task"
+
+    publishDir "${params.outdir}/realigned"
+    tag "${component}"
+
+    input:
+    set val(component),
+        file("in.vg") from realignedComponents
+
+    output:
+    set val(component),
+        file("${component}.gfa") into realignedComponentGFAs
+
+    script:
+    """
+    vg view --gfa --vg-in in.vg > "${component}.gfa"
+    """
+}
+
+
+realignedComponentGFAs.map { n, c -> c }.collect().view()
 
 
 /*
