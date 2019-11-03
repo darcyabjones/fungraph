@@ -235,7 +235,7 @@ process assembleMinigraph {
     for n in \${ORDER_ARR_FILES}
     do
       NAME=\$(basename \${n%.*})
-      echo -e "\${NAME}\\t\${i}" >> genome_order.tsv 
+      echo -e "\${NAME}\\t\${i}" >> genome_order.tsv
       i=\$(( i+1 ))
     done
 
@@ -394,7 +394,8 @@ process selectBestContigsForComponents {
     set val(name),
         file("fasta_components_${name}/*.fasta") into bestContigsForComponents mode flatten
 
-    set val(name), file("unplaced_${name}.fasta") into unplacedContigsForComponents optional true
+    set val(name),
+        file("unplaced_${name}.fasta") into unplacedContigs optional true
 
     file "contigs_to_components_${name}.tsv"
 
@@ -427,20 +428,27 @@ process selectBestContigsForComponents {
 // and 2 we align the more contiguous assemblies first, which should help with
 // the alignments via paths. and 3 maintains the order between runs so checkpointing
 // is preserved.
-genomeOrder
-    .splitCsv(sep: "\t")
-    .tap { genomeOrder4BestContigsForComponents }
-    .max { it[1] }
-    .map { name, index -> name }
-    .set { lastGenomeName }
-
 
 bestContigsForComponents
     .map { n, c -> [n, c.baseName, c] }
-    .combine(genomeOrder4BestContigsForComponents, by: 0)
+    .combine(genomeOrder.splitCsv(sep: "\t"), by: 0)
     .toSortedList( { a, b -> a[3] <=> b[3] } )
     .flatMap { li -> li.collect { n, c, f, o -> [c, n, f] } }
-    .set { sortedBestContigsForComponents }
+    .into {
+        sortedBestContigsForComponents;
+        sortedBestContigsForComponents4FindLength;
+        sortedBestContigsForComponents4FindLast;
+    }
+
+sortedBestContigsForComponents4FindLength
+    .count()
+    .set { numRealignments }
+
+sortedBestContigsForComponents4FindLast
+    .map { c, n, f -> [c, n] }
+    .groupTuple(by: 0)
+    .map { c, ns -> [c, ns[-1]] }
+    .set { lastComponentNames }
 
 
 // The component filename will match the component label.
@@ -462,14 +470,20 @@ process realignScaffoldsToInitialGraph {
     tag "${component} - ${name}"
 
     input:
+    // The merge channel here is just to provide a stop condition for the recursion.
     set val(component),
         file("in.vg"),
         val(name),
         file("in.fasta") from initialComponentVgs4RealignScaffoldsToInitialGraph
-            .mix(realignmentAccumulator.map { c, n, v, f -> [c, v] })
+            .mix(realignmentAccumulator)
             .join(sortedBestContigsForComponents, by: 0)
+            .merge(Channel.from( 1..numRealignments.val )
+            .map { c, v, n, f, i -> [c, v, n, f] }
 
     output:
+    set val(component),
+        file("out.vg") into realignmentAccumulator
+
     set val(component),
         val(name),
         file("out.vg") into realignedScaffoldsToInitialGraph
@@ -496,80 +510,175 @@ process realignScaffoldsToInitialGraph {
       --debug \
     > msga.vg
 
-    vg mod --unchop msga.vg > "out.vg"
-    # rm -f msga.vg
+    vg mod --unchop msga.vg > unchopped.vg
+    vg mod --until-normal 10 unchopped.vg > normalised.vg
+    vg mod --compact-ids normalised.vg > out.vg
+
+    rm -f msga.vg unchopped.vg normalised.vg
     rm -rf -- tmp
     """
 }
 
-realignmentFinal = Channel.create()
 
-realignedScaffoldsToInitialGraph
-   .combine(lastGenomeName)
-    .choice( realignmentFinal, realignmentAccumulator ) { it[1] == it[3] ? 0 : 1 }
-
-
-// Keeping the recursive channel separated by processes seems
-// to be important for closing the channel.
 process normaliseRealignedScaffolds {
 
     label "vg"
     label "small_task"
     time "4h"
 
-    publishDir "${params.outdir}/realigned"
     tag "${component}"
 
     input:
     set val(component),
-        file("in.vg") from realignmentFinal
-            .map { c, n, v, f -> [c, v] }
+        file("in.vg") from realignedScaffoldsToInitialGraph
+            .combine(lastComponentNames, by: [0, 1])
+            .filter { c, n, v, l -> n == l }
+            .map { c, n, v, l -> [c, v] }
 
     output:
     set val(component),
-        file("${component}.vg") into realignedComponents
+        file("out.vg") into realignedComponents
 
     script:
     """
-    vg mod --remove-non-path in.vg \
-    | vg mod \
-      --unchop \
-      - \
-    | vg mod --until-normal 10 - \
-    | vg mod --compact-ids - \
-    > "${component}.vg"
+    vg mod --remove-non-path in.vg > path_only.vg
+    vg mod --unchop path_only.vg > unchopped.vg
+    vg mod --until-normal 10 unchopped.vg > normalised.vg
+    vg mod --compact-ids normalised.vg > out.vg
+
+    rm -f path_only.vg unchopped.vg normalised.vg
     """
 }
 
 
-process getComponentGFAs {
+process combineRealignedComponents {
 
     label "vg"
     label "small_task"
 
-    publishDir "${params.outdir}/realigned"
-    tag "${component}"
-
     input:
-    set val(component),
-        file("in.vg") from realignedComponents
+    file "in/*" from realignedComponents
+        .map { c, v -> v }
+        .collect()
 
     output:
-    set val(component),
-        file("${component}.gfa") into realignedComponentGFAs
+    file "combined.vg" into combinedRealignedComponents
 
     script:
     """
-    vg view --gfa --vg-in in.vg > "${component}.gfa"
+    cp -rL in out
+
+    vg ids -j out/*.vg
+    cat out/*.vg > combined.vg
     """
 }
 
 
-realignedComponentGFAs.map { n, c -> c }.collect().view()
+unplacedContigs
+    .tap { unplacedContigs4RealignScaffolds }
+    .count()
+    .set { numCombinedRealignments }
+
+if ( numCombinedRealignments.val > 0 ) {
+
+    combinedRealignmentAccumulator = Channel.create()
+
+    process realignScaffoldsToCombinedComponents {
+
+        label "vg"
+        label "small_task"
+        time "1d"
+
+        tag "${name}"
+
+        input:
+        // The merge channel here is just to provide a stop condition for the recursion.
+        set file("in.vg"),
+            val(name),
+            file("in.fasta") from combineRealignedComponents
+                .mix(combineRealignedAccumulator)
+                .combine(unplacedContigsForComponents)
+                .merge(Channel.from( 1..numCombinedRealignments.val )
+                .map { v, n, f, i -> [v, n, f] }
+
+        output:
+        file "out.vg"  into combinedRealignmentAccumulator
+        file "out.vg"  into realignedScaffoldsToCombinedGraph
+
+        script:
+        """
+        mkdir -p tmp
+        TMPDIR="\${PWD}/tmp"
+
+        vg mod -X 512 in.vg > chopped.vg
+
+        vg msga \
+          --graph chopped.vg \
+          --from in.fasta \
+          --threads "${task.cpus}" \
+          --band-multi 128 \
+          --try-at-least 1 \
+          --hit-max 500 \
+          --max-multimaps 1 \
+          --idx-kmer-size 16 \
+          --idx-edge-max 3 \
+          --idx-doublings 3 \
+          --node-max 512 \
+          --debug \
+        > msga.vg
+
+        vg mod --unchop msga.vg > unchopped.vg
+        vg mod --until-normal 10 unchopped.vg > normalised.vg
+        vg mod --compact-ids normalised.vg > out.vg
+
+        rm -f msga.vg unchopped.vg normalised.vg
+        rm -rf -- tmp
+        """
+    }
+
+    realignedScaffoldsToCombinedGraph.last().set {finalisedRealignedGraph}
+
+} else {
+
+    combineRealignedComponent.set {finalisedRealignedGraph}
+
+}
+
+finalisedRealignedGraph.set {
+    finalisedRealignedGraph4Split;
+    finalisedRealignedGraph4Index;
+}
+
+
+process splitFinalisedGraph {
+
+    label "vg"
+    label "medium_task"
+    time "6h"
+
+    input:
+    file "realigned.vg" from finalisedRealignedGraph4Split
+
+    output:
+    file "components/*.vg" into finalisedRealignedComponents mode flatten
+
+    script:
+    """
+    vg view --gfa --vg-in realigned.vg > realigned.gfa
+    vg explode --threads "${task.cpus}" realigned.vg components
+
+    for f in components/*
+    do
+      NOEXT="\${f%.*}"
+      vg view --gfa --vg-in "\${f}" > "\${NOEXT}.gfa"
+    done
+    """
+}
 
 
 /*
  * Compute the indices needed to align against the genome.
+ */
 process indexRealignedVG {
 
     label "vg"
@@ -580,32 +689,30 @@ process indexRealignedVG {
     publishDir "${params.outdir}/realigned"
 
     input:
-    file "realigned.vg" from initialVg.mix(realignmentAccumulator)
+    file "realigned.vg" from finalisedRealignedGraph4Index
 
     output:
-    set file("realigned.vg"),
-        file("realigned.xg"),
-        file("realigned.gcsa"),
-        file("realigned.gcsa.lcp") into indexedRealignmentAccumulator
+    set file("realigned_chopped.vg"),
+        file("realigned_chopped.xg"),
+        file("realigned_chopped.gcsa"),
+        file("realigned_chopped.gcsa.lcp") into indexedRealignedGraph
 
-    // This is where the output will go.
-    set file("realigned.vg"),
-        file("realigned.xg"),
-        file("realigned.gcsa"),
-        file("realigned.gcsa.lcp") into finalRealignedGraph
+    file "realigned.vg"
 
     script:
     """
     mkdir -p tmp
     TMPDIR="\${PWD}/tmp"
 
+    vg mod -X 32 realigned.vg > realigned_chopped.vg
+
     vg index \
-      -x "realigned.xg" \
+      -x "realigned_chopped.xg" \
       --temp-dir ./tmp \
       --threads "${task.cpus}" \
-      realigned.vg
+      realigned_chopped.vg
 
-    vg mod -M 32 realigned.vg > simplified.vg
+    vg mod -M 32 realigned_chopped.vg > simplified.vg
 
     vg prune \
       -u simplified.vg \
@@ -614,72 +721,20 @@ process indexRealignedVG {
     > extra_simplified.vg
 
     vg index \
-      -g realigned.gcsa \
+      -g realigned_chopped.gcsa \
       -f node_mapping \
       --temp-dir ./tmp \
       --threads "${task.cpus}" \
       --progress \
       --kmer-size 16 \
-      --doubling-steps 2 \
+      --doubling-steps 3 \
       extra_simplified.vg
 
     rm -rf -- tmp
     rm -f simplified.vg extra_simplified.vg node_mapping
     """
 }
- */
 
-
-/*
- * Take the updated indexed graph and align the genome to it, keeping
- * only the best alignments.
-process realignScaffoldsToGraph {
-
-    label "vg"
-    label "big_task"
-    time "12h"
-
-    tag "${name}"
-
-    input:
-    set val(name),
-        file("genome.fasta"),
-        file("input.vg"),
-        file("input.xg"),
-        file("input.gcsa"),
-        file("input.gcsa.lcp") from genomes4RealignScaffoldsToGraph
-            .merge(indexedRealignmentAccumulator)
-
-    output:
-    // This feeds back into the accumulator, to be re-indexed.
-    file "output.vg" into realignmentAccumulator
-
-    script:
-    """
-    vg map \
-      -x input.xg \
-      -g input.gcsa \
-      --fasta genome.fasta \
-      --threads "${task.cpus}" \
-      --hit-max 500 \
-      --band-multi 128 \
-      --alignment-model long \
-      --max-multimaps 1 \
-    > out.gam
-
-    vg augment \
-      --include-paths \
-      --cut-softclips \
-      input.vg \
-      out.gam \
-    > augmented.vg
-
-    vg mod -X 32 augmented.vg > output.vg
-
-    rm -f out.gam augmented.vg
-    """
-}
- */
 
 
 // /*
