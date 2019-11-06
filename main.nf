@@ -28,7 +28,7 @@ params.genomes = false
 params.complete_genomes = false
 params.minigraph_preset = "ggs"
 params.max_ns = 50
-params.min_contig = 1000
+params.min_contig = 500
 
 if ( !(params.genomes || params.complete_genomes) ) {
     log.error "Please provide some genomes."
@@ -106,6 +106,8 @@ process unscaffoldGenomes {
     label "small_task"
     time "1h"
 
+    publishDir "${params.outdir}/processed"
+
     tag "${name}"
 
     input:
@@ -135,6 +137,8 @@ process preprocessCompleteGenomes {
     label "posix"
     label "small_task"
     time "1h"
+
+    publishDir "${params.outdir}/processed"
 
     tag "${name}"
 
@@ -228,7 +232,7 @@ process assembleMinigraph {
       ORDER=""
     fi
 
-    ORDER_ARR_FILES=\${COMPLETE_ORDER} \${ORDER}
+    ORDER_ARR_FILES="\${COMPLETE_ORDER} \${ORDER}"
 
     i=0
     touch genome_order.tsv
@@ -402,7 +406,7 @@ process selectBestContigsForComponents {
     script:
     """
     select_best_contigs_for_components.py \
-      --min-coverage 0.7 \
+      --min-coverage 0.9 \
       --outfile "contigs_to_components_${name}.tsv" \
       gafs/*
 
@@ -431,7 +435,7 @@ process selectBestContigsForComponents {
 
 bestContigsForComponents
     .map { n, c -> [n, c.baseName, c] }
-    .combine(genomeOrder.splitCsv(sep: "\t"), by: 0)
+    .combine(genomeOrder.splitCsv(sep: "\t").map { n, i -> [n, i.toInteger()] }, by: 0)
     .toSortedList( { a, b -> a[3] <=> b[3] } )
     .flatMap { li -> li.collect { n, c, f, o -> [c, n, f] } }
     .into {
@@ -466,7 +470,6 @@ process realignScaffoldsToInitialGraph {
     label "small_task"
     time "1d"
 
-
     tag "${component} - ${name}"
 
     input:
@@ -486,36 +489,70 @@ process realignScaffoldsToInitialGraph {
 
     set val(component),
         val(name),
+        file("out.vg") into vg4GetAccumulatorGFAs
+
+    set val(component),
+        val(name),
         file("out.vg") into realignedScaffoldsToInitialGraph
 
     script:
+    node_size = 32
+    bandwidth = 256
+
     """
     mkdir -p tmp
     TMPDIR="\${PWD}/tmp"
 
-    vg mod -X 512 in.vg > chopped.vg
+    vg mod -X "${node_size}" in.vg > chopped.vg
 
     vg msga \
       --graph chopped.vg \
       --from in.fasta \
       --threads "${task.cpus}" \
-      --band-multi 128 \
+      --band-multi "${bandwidth}" \
       --try-at-least 1 \
-      --hit-max 500 \
+      --hit-max 1028 \
       --max-multimaps 1 \
       --idx-kmer-size 16 \
       --idx-edge-max 3 \
-      --idx-doublings 3 \
-      --node-max 512 \
+      --idx-doublings 2 \
+      --node-max "${node_size}" \
       --debug \
     > msga.vg
 
     vg mod --unchop msga.vg > unchopped.vg
     vg mod --until-normal 10 unchopped.vg > normalised.vg
-    vg mod --compact-ids normalised.vg > out.vg
+    vg ids --compact normalised.vg > out.vg
 
     rm -f msga.vg unchopped.vg normalised.vg
     rm -rf -- tmp
+    """
+}
+
+
+process getAccumulatorGFAs {
+
+    label "vg"
+    label "small_task"
+    time "1h"
+
+    publishDir "${params.outdir}/initial/realignment_progress"
+
+    tag "${component} - ${name}"
+
+    input:
+    set val(component),
+        val(name),
+        file("in.vg") from vg4GetAccumulatorGFAs
+
+    output:
+    file "${component}.vg"
+    file "${component}.gfa"
+
+    script:
+    """
+    vg view --gfa --vg-in in.vg > "${component}.gfa"
+    ln -sf "\${PWD}/in.vg" "\${PWD}/${component}.vg"
     """
 }
 
@@ -595,9 +632,9 @@ if ( numCombinedRealignments.val > 0 ) {
         // The merge channel here is just to provide a stop condition for the recursion.
         set file("in.vg"),
             val(name),
-            file("in.fasta") from combineRealignedComponents
-                .mix(combineRealignedAccumulator)
-                .combine(unplacedContigsForComponents)
+            file("in.fasta") from combinedRealignedComponents
+                .mix(combinedRealignmentAccumulator)
+                .combine(unplacedContigs4RealignScaffolds)
                 .merge(Channel.from( 1..numCombinedRealignments.val))
                 .map { v, n, f, i -> [v, n, f] }
 
@@ -606,31 +643,32 @@ if ( numCombinedRealignments.val > 0 ) {
         file "out.vg" into realignedScaffoldsToCombinedGraph
 
         script:
+        node_size = 32
+        bandwidth = 256
+
         """
         mkdir -p tmp
         TMPDIR="\${PWD}/tmp"
 
-        vg mod -X 256 in.vg > chopped.vg
+        vg mod -X "${node_size}" in.vg > chopped.vg
 
         vg msga \
           --graph chopped.vg \
           --from in.fasta \
           --threads "${task.cpus}" \
-          --band-multi 512 \
+          --band-multi "${bandwidth}" \
           --try-at-least 1 \
-          --hit-max 500 \
           --max-multimaps 1 \
           --idx-kmer-size 16 \
           --idx-edge-max 3 \
-          --idx-doublings 3 \
-          --node-max 256 \
-          --min-ident 0.8 \
+          --idx-doublings 2 \
+          --node-max "${node_size}" \
           --debug \
         > msga.vg
 
         vg mod --unchop msga.vg > unchopped.vg
         vg mod --until-normal 10 unchopped.vg > normalised.vg
-        vg mod --compact-ids normalised.vg > out.vg
+        vg ids --compact normalised.vg > out.vg
 
         rm -f msga.vg unchopped.vg normalised.vg
         rm -rf -- tmp
