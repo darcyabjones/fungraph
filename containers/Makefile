@@ -38,11 +38,26 @@ MINIGRAPH_COMMIT=b1976de
 MINIGRAPH_REPO=https://github.com/lh3/minigraph.git
 MINIGRAPH_PREFIX_ARG=$(INSTALL_BASE)/minigraph/$(MINIGRAPH_COMMIT)
 
+MUMMER_VERSION=4.0.0beta2
+MUMMER_URL=https://github.com/mummer4/mummer/releases/download/v4.0.0beta2/mummer-4.0.0beta2.tar.gz
+MUMMER_PREFIX_ARG=$(INSTALL_BASE)/mummer/$(MUMMER_VERSION)
+
+GRAPHALIGNER_COMMIT=260df01
+GRAPHALIGNER_REPO=https://github.com/maickrau/GraphAligner.git
+GRAPHALIGNER_PREFIX_ARG=$(INSTALL_BASE)/graphaligner/$(GRAPHALIGNER_COMMIT)
+
+ZSTR_REPO=https://github.com/mateidavid/zstr.git
+BBHASH_REPO=https://github.com/maickrau/BBHash.git
+JEMALLOC_URL=https://github.com/jemalloc/jemalloc/releases/download/5.1.0/jemalloc-5.1.0.tar.bz2
+SPARSEHASH_URL=https://github.com/sparsehash/sparsehash/archive/sparsehash-2.0.3.tar.gz
+
 GFATOOLS_COMMIT=858a87b
 GFATOOLS_REPO=https://github.com/lh3/gfatools.git
 GFATOOLS_PREFIX_ARG=$(INSTALL_BASE)/GFATOOLS/$(GFATOOLS_COMMIT)
 
-GENERAL=base python3 minimap2 seqwish fpa odgi vg minigraph gfatools
+
+
+GENERAL=base python3 minimap2 seqwish fpa odgi vg minigraph gfatools graphaligner
 
 
 all: docker/all singularity/all
@@ -205,6 +220,26 @@ docker/vg: vg.Dockerfile docker/base
 	  --build-arg VG_VERSION="$(VG_VERSION)" \
 	  --build-arg VG_URL="$(VG_URL)" \
 	  --build-arg VG_PREFIX_ARG="$(VG_PREFIX_ARG)" \
+	  --file $< \
+	  -t "$(call make_image_name,$@)" \
+	  .
+	@mkdir -p "$(dir $@)"
+	@touch $@
+
+
+docker/graphaligner: graphaligner.Dockerfile docker/base
+	docker build \
+	  --build-arg IMAGE="$(BASE_IMAGE)" \
+	  --build-arg GRAPHALIGNER_COMMIT="$(GRAPHALIGNER_COMMIT)" \
+	  --build-arg GRAPHALIGNER_REPO="$(GRAPHALIGNER_REPO)" \
+	  --build-arg GRAPHALIGNER_PREFIX_ARG="$(GRAPHALIGNER_PREFIX_ARG)" \
+	  --build-arg ZSTR_REPO="$(ZSTR_REPO)" \
+	  --build-arg BBHASH_REPO="$(BBHASH_REPO)" \
+	  --build-arg JEMALLOC_URL="$(JEMALLOC_URL)" \
+	  --build-arg SPARSEHASH_URL="$(SPARSEHASH_URL)" \
+	  --build-arg MUMMER_VERSION="$(MUMMER_VERSION)" \
+	  --build-arg MUMMER_URL="$(MUMMER_URL)" \
+	  --build-arg MUMMER_PREFIX_ARG="$(MUMMER_PREFIX_ARG)" \
 	  --file $< \
 	  -t "$(call make_image_name,$@)" \
 	  .
