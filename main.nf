@@ -28,7 +28,7 @@ params.genomes = false
 params.complete_genomes = false
 params.minigraph_preset = "ggs"
 params.max_ns = 50
-params.min_contig = 1000
+params.min_contig = 500
 
 if ( !(params.genomes || params.complete_genomes) ) {
     log.error "Please provide some genomes."
@@ -106,6 +106,8 @@ process unscaffoldGenomes {
     label "small_task"
     time "1h"
 
+    publishDir "${params.outdir}/processed"
+
     tag "${name}"
 
     input:
@@ -135,6 +137,8 @@ process preprocessCompleteGenomes {
     label "posix"
     label "small_task"
     time "1h"
+
+    publishDir "${params.outdir}/processed"
 
     tag "${name}"
 
@@ -228,7 +232,7 @@ process assembleMinigraph {
       ORDER=""
     fi
 
-    ORDER_ARR_FILES=\${COMPLETE_ORDER} \${ORDER}
+    ORDER_ARR_FILES="\${COMPLETE_ORDER} \${ORDER}"
 
     i=0
     touch genome_order.tsv
@@ -402,7 +406,7 @@ process selectBestContigsForComponents {
     script:
     """
     select_best_contigs_for_components.py \
-      --min-coverage 0.7 \
+      --min-coverage 0.9 \
       --outfile "contigs_to_components_${name}.tsv" \
       gafs/*
 
@@ -431,7 +435,7 @@ process selectBestContigsForComponents {
 
 bestContigsForComponents
     .map { n, c -> [n, c.baseName, c] }
-    .combine(genomeOrder.splitCsv(sep: "\t"), by: 0)
+    .combine(genomeOrder.splitCsv(sep: "\t").map { n, i -> [n, i.toInteger()] }, by: 0)
     .toSortedList( { a, b -> a[3] <=> b[3] } )
     .flatMap { li -> li.collect { n, c, f, o -> [c, n, f] } }
     .into {
@@ -466,7 +470,6 @@ process realignScaffoldsToInitialGraph {
     label "small_task"
     time "1d"
 
-
     tag "${component} - ${name}"
 
     input:
@@ -477,7 +480,7 @@ process realignScaffoldsToInitialGraph {
         file("in.fasta") from initialComponentVgs4RealignScaffoldsToInitialGraph
             .mix(realignmentAccumulator)
             .join(sortedBestContigsForComponents, by: 0)
-            .merge(Channel.from( 1..numRealignments.val )
+            .merge(Channel.from( 1..numRealignments.val))
             .map { c, v, n, f, i -> [c, v, n, f] }
 
     output:
@@ -486,36 +489,70 @@ process realignScaffoldsToInitialGraph {
 
     set val(component),
         val(name),
+        file("out.vg") into vg4GetAccumulatorGFAs
+
+    set val(component),
+        val(name),
         file("out.vg") into realignedScaffoldsToInitialGraph
 
     script:
+    node_size = 32
+    bandwidth = 256
+
     """
     mkdir -p tmp
     TMPDIR="\${PWD}/tmp"
 
-    vg mod -X 512 in.vg > chopped.vg
+    vg mod -X "${node_size}" in.vg > chopped.vg
 
     vg msga \
       --graph chopped.vg \
       --from in.fasta \
       --threads "${task.cpus}" \
-      --band-multi 128 \
+      --band-multi "${bandwidth}" \
       --try-at-least 1 \
-      --hit-max 500 \
+      --hit-max 1028 \
       --max-multimaps 1 \
       --idx-kmer-size 16 \
       --idx-edge-max 3 \
-      --idx-doublings 3 \
-      --node-max 512 \
+      --idx-doublings 2 \
+      --node-max "${node_size}" \
       --debug \
     > msga.vg
 
     vg mod --unchop msga.vg > unchopped.vg
     vg mod --until-normal 10 unchopped.vg > normalised.vg
-    vg mod --compact-ids normalised.vg > out.vg
+    vg ids --compact normalised.vg > out.vg
 
     rm -f msga.vg unchopped.vg normalised.vg
     rm -rf -- tmp
+    """
+}
+
+
+process getAccumulatorGFAs {
+
+    label "vg"
+    label "small_task"
+    time "1h"
+
+    publishDir "${params.outdir}/initial/realignment_progress"
+
+    tag "${component} - ${name}"
+
+    input:
+    set val(component),
+        val(name),
+        file("in.vg") from vg4GetAccumulatorGFAs
+
+    output:
+    file "${component}.vg"
+    file "${component}.gfa"
+
+    script:
+    """
+    vg view --gfa --vg-in in.vg > "${component}.gfa"
+    ln -sf "\${PWD}/in.vg" "\${PWD}/${component}.vg"
     """
 }
 
@@ -531,7 +568,7 @@ process normaliseRealignedScaffolds {
     input:
     set val(component),
         file("in.vg") from realignedScaffoldsToInitialGraph
-            .combine(lastComponentNames, by: [0, 1])
+            .combine(lastComponentNames, by: 0)
             .filter { c, n, v, l -> n == l }
             .map { c, n, v, l -> [c, v] }
 
@@ -557,7 +594,7 @@ process combineRealignedComponents {
     label "small_task"
 
     input:
-    file "in/*" from realignedComponents
+    file "in/*.vg" from realignedComponents
         .map { c, v -> v }
         .collect()
 
@@ -595,41 +632,43 @@ if ( numCombinedRealignments.val > 0 ) {
         // The merge channel here is just to provide a stop condition for the recursion.
         set file("in.vg"),
             val(name),
-            file("in.fasta") from combineRealignedComponents
-                .mix(combineRealignedAccumulator)
-                .combine(unplacedContigsForComponents)
-                .merge(Channel.from( 1..numCombinedRealignments.val )
+            file("in.fasta") from combinedRealignedComponents
+                .mix(combinedRealignmentAccumulator)
+                .combine(unplacedContigs4RealignScaffolds)
+                .merge(Channel.from( 1..numCombinedRealignments.val))
                 .map { v, n, f, i -> [v, n, f] }
 
         output:
-        file "out.vg"  into combinedRealignmentAccumulator
-        file "out.vg"  into realignedScaffoldsToCombinedGraph
+        file "out.vg" into combinedRealignmentAccumulator
+        file "out.vg" into realignedScaffoldsToCombinedGraph
 
         script:
+        node_size = 32
+        bandwidth = 256
+
         """
         mkdir -p tmp
         TMPDIR="\${PWD}/tmp"
 
-        vg mod -X 512 in.vg > chopped.vg
+        vg mod -X "${node_size}" in.vg > chopped.vg
 
         vg msga \
           --graph chopped.vg \
           --from in.fasta \
           --threads "${task.cpus}" \
-          --band-multi 128 \
+          --band-multi "${bandwidth}" \
           --try-at-least 1 \
-          --hit-max 500 \
           --max-multimaps 1 \
           --idx-kmer-size 16 \
           --idx-edge-max 3 \
-          --idx-doublings 3 \
-          --node-max 512 \
+          --idx-doublings 2 \
+          --node-max "${node_size}" \
           --debug \
         > msga.vg
 
         vg mod --unchop msga.vg > unchopped.vg
         vg mod --until-normal 10 unchopped.vg > normalised.vg
-        vg mod --compact-ids normalised.vg > out.vg
+        vg ids --compact normalised.vg > out.vg
 
         rm -f msga.vg unchopped.vg normalised.vg
         rm -rf -- tmp
@@ -640,52 +679,23 @@ if ( numCombinedRealignments.val > 0 ) {
 
 } else {
 
-    combineRealignedComponent.set {finalisedRealignedGraph}
+    combinedRealignedComponents.set {finalisedRealignedGraph}
 
 }
 
-finalisedRealignedGraph.set {
+finalisedRealignedGraph.into {
     finalisedRealignedGraph4Split;
     finalisedRealignedGraph4Index;
+    finalisedRealignedGraph4GFA;
 }
 
 
-process splitFinalisedGraph {
-
-    label "vg"
-    label "medium_task"
-    time "6h"
-
-    input:
-    file "realigned.vg" from finalisedRealignedGraph4Split
-
-    output:
-    file "components/*.vg" into finalisedRealignedComponents mode flatten
-
-    script:
-    """
-    vg view --gfa --vg-in realigned.vg > realigned.gfa
-    vg explode --threads "${task.cpus}" realigned.vg components
-
-    for f in components/*
-    do
-      NOEXT="\${f%.*}"
-      vg view --gfa --vg-in "\${f}" > "\${NOEXT}.gfa"
-    done
-    """
-}
-
-
-/*
- * Compute the indices needed to align against the genome.
- */
 process indexRealignedVG {
 
     label "vg"
     label "biggish_task"
     time "12h"
 
-    // This will be overwritten at each iteration
     publishDir "${params.outdir}/realigned"
 
     input:
@@ -735,6 +745,253 @@ process indexRealignedVG {
     """
 }
 
+
+process splitFinalisedGraph {
+
+    label "vg"
+    label "medium_task"
+    time "6h"
+
+    input:
+    file "realigned.vg" from finalisedRealignedGraph4Split
+
+    output:
+    file "components/*.vg" into finalisedRealignedComponents mode flatten
+
+    script:
+    """
+    vg view --gfa --vg-in realigned.vg > realigned.gfa
+    vg explode --threads "${task.cpus}" realigned.vg components
+
+    for f in components/*
+    do
+      NOEXT="\${f%.*}"
+      vg view --gfa --vg-in "\${f}" > "\${NOEXT}.gfa"
+    done
+    """
+}
+
+finalisedRealignedComponents
+    .map { v -> [v.baseName, v] }
+    .into {
+        finalisedRealignedComponents4Index;
+        finalisedRealignedComponents4GFA;
+    }
+
+
+/*
+ * Compute the indices needed to align against the genome.
+ */
+process indexRealignedVGComponents {
+
+    label "vg"
+    label "biggish_task"
+    time "12h"
+
+    publishDir "${params.outdir}/realigned/components"
+
+    tag "${component}"
+
+    input:
+    set val(component),
+        file(vg) from finalisedRealignedComponents4Index
+
+    output:
+    set val(component),
+        file("${component}_chopped.vg"),
+        file("${component}_chopped.xg"),
+        file("${component}_chopped.gcsa"),
+        file("${component}_chopped.gcsa.lcp") into indexedRealignedComponents
+
+    set val(component), file("${vg}")
+
+    script:
+    """
+    mkdir -p tmp
+    TMPDIR="\${PWD}/tmp"
+
+    vg mod -X 32 "${vg}" > "${component}_chopped.vg"
+
+    vg index \
+      -x "${component}_chopped.xg" \
+      --temp-dir ./tmp \
+      --threads "${task.cpus}" \
+      "${component}_chopped.vg"
+
+    vg mod -M 32 "${component}_chopped.vg" > simplified.vg
+
+    vg prune \
+      -u simplified.vg \
+      -m node_mapping \
+      --threads "${task.cpus}" \
+    > extra_simplified.vg
+
+    vg index \
+      -g "${component}_chopped.gcsa" \
+      -f node_mapping \
+      --temp-dir ./tmp \
+      --threads "${task.cpus}" \
+      --progress \
+      --kmer-size 16 \
+      --doubling-steps 3 \
+      extra_simplified.vg
+
+    rm -rf -- tmp
+    rm -f simplified.vg extra_simplified.vg node_mapping
+    """
+}
+
+
+
+
+process getRealignedGFA {
+
+    label "vg"
+    label "small_task"
+
+    publishDir "${params.outdir}/realigned"
+
+    input:
+    file "in.vg" from finalisedRealignedGraph4GFA
+
+    output:
+    file "realigned.gfa" into finalisedRealignedGFA
+
+    script:
+    """
+    vg view --vg-in --gfa in.vg > realigned.gfa
+    """
+}
+
+
+process getRealignedComponentsGFA {
+
+    label "vg"
+    label "small_task"
+
+    publishDir "${params.outdir}/realigned/components"
+
+    tag "${component}"
+   
+    input:
+    set val(component),
+        file("in.vg") from finalisedRealignedComponents4GFA
+
+    output:
+    set val(component),
+        file("${component}.gfa") into finalisedRealignedComponentGFA
+
+    script:
+    """
+    vg view --vg-in --gfa in.vg > "${component}.gfa"
+    """
+}
+
+
+/*
+ * ODGI
+ * url: https://github.com/vgteam/odgi
+ */
+process gfa2ODGI {
+
+    label "odgi"
+    label "small_task"
+    time "5h"
+
+    publishDir "${params.outdir}/odgi"
+    tag "${component}"
+
+    input:
+    set val(component),
+        file("in.gfa") from finalisedRealignedComponentGFA
+
+    output:
+    set val(component),
+        file("${component}.dg") into componentOdgiGraph
+
+    script:
+    """
+    odgi build -g in.gfa -o build.dg -p
+    odgi sort -i build.dg -o "${component}.dg"
+    rm -f build.dg
+    """
+}
+
+
+componentOdgiGraph.into {
+    componentOdgiGraph4Vis;
+    componentOdgiGraph4Fasta;
+}
+
+
+/*
+ * ODGI
+ * url: https://github.com/vgteam/odgi
+ *
+ * Makes this interesting plot.
+ */
+process visualiseGraph {
+
+    label "odgi"
+    label "big_task"
+    time "2h"
+
+    publishDir "${params.outdir}/odgi"
+    tag "${component}"
+
+    input:
+    set val(component), file("in.dg") from componentOdgiGraph4Vis
+
+    output:
+    file "${component}.png"
+
+    script:
+    """
+    odgi viz \
+      --threads "${task.cpus}" \
+      -i in.dg \
+      -x 4000 \
+      -y 800 \
+      -L 0.5 \
+      -X 1 \
+      -P 10 \
+      -R \
+      -o "${component}.png"
+    """
+}
+
+
+process getComponentFastas {
+
+    label "odgi"
+    label "small_task"
+
+    publishDir "${params.outdir}/odgi"
+    tag "${component}"
+
+    input:
+    set val(component), file("in.dg") from componentOdgiGraph4Fasta
+
+    output:
+    file "${component}.fasta"
+    file "${component}.json"
+
+    script:
+    """
+    odgi bin \
+      -i in.dg \
+      -w 100 \
+      --json \
+    > "${component}.json"
+
+    echo ">${component}" > "${component}.fasta"
+    awk '/bin_id/ {
+      \$0=gensub(/.*sequence":"([^"]+)"}/, "\\\\1", "g", \$0);
+      print
+    }' "${component}.json" \
+    >> "${component}.fasta"
+    """
+}
 
 
 // /*
