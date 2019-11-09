@@ -247,8 +247,8 @@ docker/graphaligner: graphaligner.Dockerfile docker/base
 	@touch $@
 
 
-docker/fungraph: docker/fpa docker/minimap2 docker/odgi
-docker/fungraph: docker/seqwish docker/vg
+docker/fungraph: docker/fpa docker/minimap2 docker/minigraph docker/odgi
+docker/fungraph: docker/seqwish docker/vg docker/graphaligner
 docker/fungraph: fungraph.Dockerfile docker/base
 	docker build \
 	  --build-arg IMAGE="$(BASE_IMAGE)" \
@@ -260,6 +260,9 @@ docker/fungraph: fungraph.Dockerfile docker/base
 	  --build-arg MINIMAP2_PREFIX_ARG="$(MINIMAP2_PREFIX_ARG)" \
 	  --build-arg K8_VERSION="$(K8_VERSION)" \
 	  --build-arg K8_PREFIX_ARG="$(K8_PREFIX_ARG)" \
+	  --build-arg MINIGRAPH_IMAGE="$(call make_image_name,minigraph)" \
+	  --build-arg MINIGRAPH_COMMIT="$(MINIGRAPH_COMMIT)" \
+	  --build-arg MINIGRAPH_PREFIX_ARG="$(MINIGRAPH_PREFIX_ARG)" \
 	  --build-arg ODGI_IMAGE="$(call make_image_name,odgi)" \
 	  --build-arg ODGI_COMMIT="$(ODGI_COMMIT)" \
 	  --build-arg ODGI_PREFIX_ARG="$(ODGI_PREFIX_ARG)" \
@@ -269,6 +272,11 @@ docker/fungraph: fungraph.Dockerfile docker/base
 	  --build-arg VG_IMAGE="$(call make_image_name,vg)" \
 	  --build-arg VG_VERSION="$(VG_VERSION)" \
 	  --build-arg VG_PREFIX_ARG="$(VG_PREFIX_ARG)" \
+	  --build-arg GRAPHALIGNER_IMAGE="$(call make_image_name,graphaligner)" \
+	  --build-arg GRAPHALIGNER_COMMIT="$(GRAPHALIGNER_COMMIT)" \
+	  --build-arg GRAPHALIGNER_PREFIX_ARG="$(GRAPHALIGNER_PREFIX_ARG)" \
+	  --build-arg MUMMER_VERSION="$(MUMMER_VERSION)" \
+	  --build-arg MUMMER_PREFIX_ARG="$(MUMMER_PREFIX_ARG)" \
 	  --file $< \
 	  -t "$(call make_image_name,$@)" \
 	  .

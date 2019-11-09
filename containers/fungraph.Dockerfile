@@ -1,15 +1,19 @@
 ARG IMAGE
 ARG FPA_IMAGE
 ARG MINIMAP2_IMAGE
+ARG MINIGRAPH_IMAGE
 ARG ODGI_IMAGE
 ARG SEQWISH_IMAGE
 ARG VG_IMAGE
+ARG GRAPHALIGNER_IMAGE
 
 FROM "${FPA_IMAGE}" as fpa_builder
 FROM "${MINIMAP2_IMAGE}" as minimap2_builder
+FROM "${MINIGRAPH_IMAGE}" as minigraph_builder
 FROM "${ODGI_IMAGE}" as odgi_builder
 FROM "${SEQWISH_IMAGE}" as seqwish_builder
 FROM "${VG_IMAGE}" as vg_builder
+FROM "${GRAPHALIGNER_IMAGE}" as graphaligner_builder
 
 
 FROM "${IMAGE}"
@@ -40,6 +44,19 @@ ENV PATH "${MINIMAP2_PREFIX}/bin:${K8_PREFIX}/bin:${PATH}"
 COPY --from=minimap2_builder "${MINIMAP2_PREFIX}" "${MINIMAP2_PREFIX}"
 COPY --from=minimap2_builder "${K8_PREFIX}" "${K8_PREFIX}"
 COPY --from=minimap2_builder "${APT_REQUIREMENTS_FILE}" /build/apt/minimap2.txt
+
+
+ARG MINIGRAPH_COMMIT
+ARG MINIGRAPH_REPO
+ARG MINIGRAPH_PREFIX_ARG
+ENV MINIGRAPH_PREFIX="${MINIGRAPH_PREFIX_ARG}"
+
+LABEL minigraph.version="${MINIGRAPH_COMMIT}"
+
+ENV PATH="${MINIGRAPH_PREFIX}/bin:${PATH}"
+
+COPY --from=minigraph_builder "${MINIGRAPH_PREFIX}" "${MINIGRAPH_PREFIX}"
+COPY --from=minigraph_builder "${APT_REQUIREMENTS_FILE}" /build/apt/minigraph.txt
 
 
 ARG ODGI_COMMIT
@@ -73,6 +90,31 @@ LABEL vg.version="${VG_VERSION}"
 
 COPY --from=vg_builder "${VG_PREFIX}" "${VG_PREFIX}"
 COPY --from=vg_builder "${APT_REQUIREMENTS_FILE}" /build/apt/vg.txt
+
+
+ARG GRAPHALIGNER_COMMIT
+ARG GRAPHALIGNER_PREFIX_ARG
+ENV GRAPHALIGNER_PREFIX="${GRAPHALIGNER_PREFIX_ARG}"
+LABEL graphaligner.version="${GRAPHALIGNER_COMMIT}"
+
+ENV PATH="${GRAPHALIGNER_PREFIX}/bin:${PATH}"
+
+COPY --from=graphaligner_builder "${GRAPHALIGNER_PREFIX}" "${GRAPHALIGNER_PREFIX}"
+COPY --from=graphaligner_builder "${APT_REQUIREMENTS_FILE}" /build/apt/graphaligner_builder.txt
+
+ARG MUMMER_VERSION
+ARG MUMMER_PREFIX_ARG
+ENV MUMMER_PREFIX="${MUMMER_PREFIX_ARG}"
+
+LABEL mummer.version="${MUMMER_VERSION}"
+
+ENV PATH="${MUMMER_PREFIX}/bin:${PATH}"
+ENV LD_LIBRARY_PATH="${MUMMER_PREFIX}/lib:${PATH}"
+ENV PKG_CONFIG_PATH="${MUMMER_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH}"
+ENV CPATH="${MUMMER_PREFIX}/include:${CPATH}"
+
+COPY --from=graphaligner_builder "${MUMMER_PREFIX}" "${MUMMER_PREFIX}"
+
 
 RUN  set -eu \
   && DEBIAN_FRONTEND=noninteractive \
