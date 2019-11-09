@@ -249,7 +249,7 @@ docker/graphaligner: graphaligner.Dockerfile docker/base
 
 docker/fungraph: docker/fpa docker/minimap2 docker/minigraph docker/odgi
 docker/fungraph: docker/seqwish docker/vg docker/graphaligner
-docker/fungraph: fungraph.Dockerfile docker/base
+docker/fungraph: fungraph.Dockerfile docker/base docker/python3
 	docker build \
 	  --build-arg IMAGE="$(BASE_IMAGE)" \
 	  --build-arg FPA_IMAGE="$(call make_image_name,fpa)" \
@@ -277,6 +277,7 @@ docker/fungraph: fungraph.Dockerfile docker/base
 	  --build-arg GRAPHALIGNER_PREFIX_ARG="$(GRAPHALIGNER_PREFIX_ARG)" \
 	  --build-arg MUMMER_VERSION="$(MUMMER_VERSION)" \
 	  --build-arg MUMMER_PREFIX_ARG="$(MUMMER_PREFIX_ARG)" \
+	  --build-arg PYTHON3_IMAGE="$(call make_image_name,python3)" \
 	  --file $< \
 	  -t "$(call make_image_name,$@)" \
 	  .

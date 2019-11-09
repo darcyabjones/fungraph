@@ -6,6 +6,7 @@ ARG ODGI_IMAGE
 ARG SEQWISH_IMAGE
 ARG VG_IMAGE
 ARG GRAPHALIGNER_IMAGE
+ARG PYTHON3_IMAGE
 
 FROM "${FPA_IMAGE}" as fpa_builder
 FROM "${MINIMAP2_IMAGE}" as minimap2_builder
@@ -14,6 +15,7 @@ FROM "${ODGI_IMAGE}" as odgi_builder
 FROM "${SEQWISH_IMAGE}" as seqwish_builder
 FROM "${VG_IMAGE}" as vg_builder
 FROM "${GRAPHALIGNER_IMAGE}" as graphaligner_builder
+FROM "${PYTHON3_IMAGE}" as python3_builder
 
 
 FROM "${IMAGE}"
@@ -115,6 +117,7 @@ ENV CPATH="${MUMMER_PREFIX}/include:${CPATH}"
 
 COPY --from=graphaligner_builder "${MUMMER_PREFIX}" "${MUMMER_PREFIX}"
 
+COPY --from=python3_builder "${APT_REQUIREMENTS_FILE}" /build/apt/python3.txt
 
 RUN  set -eu \
   && DEBIAN_FRONTEND=noninteractive \
