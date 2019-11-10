@@ -156,6 +156,45 @@ def intersect(left, right):
     return Interval(lbound, rbound)
 
 
+def union(left, right):
+    lstart = min([left.begin, left.end])
+    lend = max([left.begin, left.end])
+    rstart = min([right.begin, right.end])
+    rend = max([right.begin, right.end])
+
+    if not ((lstart < rend) and (lend > rstart)):
+        raise ValueError("Left and right must be overlapping.")
+
+    lbound = min([lstart, rstart])
+    rbound = max([lend, rend])
+    return Interval(lbound, rbound)
+
+
+def diff(left, right):
+    if not left.overlaps(right):
+        return [left, right]
+
+    lstart = min([left.begin, left.end])
+    lend = max([left.begin, left.end])
+    rstart = min([right.begin, right.end])
+    rend = max([right.begin, right.end])
+
+    out = []
+    if rstart > lstart:
+        out.append(Interval(lstart, min([rstart, lend])))
+
+    if rend < lend:
+        out.append(Interval(max([lstart, rend]), lend))
+
+    return out
+
+
+def sym_diff(left, right):
+    inter = intersect(left, right)
+    uni = union(left, right)
+    return diff(uni, inter)
+
+
 def total_intersection(itree, interval):
     if interval.length() <= 0:
         return 0
@@ -170,14 +209,81 @@ def total_intersection(itree, interval):
     return total
 
 
+def get_genome_name(string, sep):
+    return string.split(sep, maxsplit=1)[0]
+
+
+def filter_by_interval(itree, interval, min_length, prop_coverage):
+    len_intersect = total_intersection(itree, interval)
+
+    if interval.length() <= 0:
+        prop_intersect = 0
+    else:
+        prop_intersect = len_intersect / interval.length()
+
+    return (len_intersect < min_length) and (prop_intersect >= prop_coverage)
+
+
 def cli(prog, args):
+
     parser = argparse.ArgumentParser(
         prog=prog,
-        description="""
-        Splits a fasta file at long stretches of Ns.
-        """
+        description=""
     )
 
+    subparsers = parser.add_subparsers(dest='subparser_name')
+
+    filter_subparser = subparsers.add_parser(
+        "filter",
+        help="Filter matches."
+    )
+
+    filter_cli(filter_subparser)
+
+    repeats_subparser = subparsers.add_parser(
+        "repeats",
+        help="Find segmental duplications."
+    )
+
+    repeats_cli(repeats_subparser)
+
+    parsed = parser.parse_args(args)
+
+    if parsed.subparser_name is None:
+        parser.print_help()
+        sys.exit(0)
+
+    return parsed
+
+
+def repeats_cli(parser):
+    parser.add_argument(
+        "inpaf",
+        default=sys.stdin,
+        type=argparse.FileType('r'),
+        help="Input paf file. Use '-' for stdin.",
+    )
+
+    parser.add_argument(
+        "-o", "--outfile",
+        default=sys.stdout,
+        type=argparse.FileType('w'),
+        help="Output bed file path. Default stdout.",
+    )
+
+    parser.add_argument(
+        "-s", "--sep",
+        default=".",
+        type=str,
+        help=(
+            "Split sequence ids by this separator and exclude matches where "
+            "both members have the same prefix."
+        )
+    )
+    return
+
+
+def filter_cli(parser):
     parser.add_argument(
         "inbed",
         default=sys.stdin,
@@ -222,26 +328,10 @@ def cli(prog, args):
         help="The maximum proportion of bases allowed to be in repeat regions."
     )
 
-    return parser.parse_args(args)
+    return
 
 
-def get_genome_name(string, sep):
-    return string.split(sep, maxsplit=1)[0]
-
-
-def filter_by_interval(itree, interval, min_length, prop_coverage):
-    len_intersect = total_intersection(itree, interval)
-
-    if interval.length() <= 0:
-        prop_intersect = 0
-    else:
-        prop_intersect = len_intersect / interval.length()
-
-    return (len_intersect < min_length) and (prop_intersect >= prop_coverage)
-
-
-def main():
-    args = cli(sys.argv[0], sys.argv[1:])
+def filter_main(args):
 
     bed = BED.from_file(args.inbed)
     bed_tree = bed_to_itree(bed)
@@ -269,6 +359,74 @@ def main():
             continue
 
         print(p, file=args.outfile)
+
+    return
+
+
+def repeats_main(args):
+    paf = PAF.from_file(args.inpaf)
+
+    repeats = defaultdict(list)
+
+    for p in paf:
+        qgenome = get_genome_name(p.query, args.sep)
+        tgenome = get_genome_name(p.target, args.sep)
+
+        if qgenome != tgenome:
+            continue
+
+        query, qinterval = p.query_as_interval()
+        target, tinterval = p.target_as_interval()
+
+        if (query == target) and qinterval.overlaps(tinterval):
+            filtered = sym_diff(qinterval, tinterval)
+            repeats[query].extend(filtered)
+        else:
+            repeats[query].append(qinterval)
+            repeats[target].append(tinterval)
+
+    for seqid, intervals in repeats.items():
+        itree = IntervalTree(intervals)
+        itree.merge_overlaps()
+        for interval in itree:
+            bed = BED(seqid, interval.begin, interval.end)
+            print(bed, file=args.outfile)
+    return
+
+
+def main():
+    args = cli(prog=sys.argv[0], args=sys.argv[1:])
+    try:
+        if args.subparser_name == "filter":
+            filter_main(args)
+        elif args.subparser_name == "repeats":
+            repeats_main(args)
+        else:
+            raise ValueError("I shouldn't reach this point ever")
+
+    except BrokenPipeError:
+        # Pipes get closed and that's normal
+        sys.exit(0)
+
+    except KeyboardInterrupt:
+        print("Received keyboard interrupt. Exiting.", file=sys.stderr)
+        sys.exit(1)
+
+    except EnvironmentError as e:
+        print((
+            "Encountered a system error.\n"
+            "We can't control these, and they're usually related to your OS.\n"
+            "Try running again."
+        ), file=sys.stderr)
+        raise e
+
+    except Exception as e:
+        print((
+            "I'm so sorry, but we've encountered an unexpected error.\n"
+            "This shouldn't happen, so please file a bug report with the "
+            "authors.\nWe will be extremely grateful!\n\n"
+        ), file=sys.stderr)
+        raise e
 
     return
 
