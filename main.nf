@@ -220,7 +220,7 @@ process alignScaffoldsAllVAll {
     file "in.fasta" from hardMasked4AlignScaffoldsAllVAll
 
     output:
-    file "aligned.paf" into alignedScaffoldsAllvAll
+    file "aligned.paf" into alignedScaffoldsAllVAll
 
     script:
     """
@@ -253,7 +253,7 @@ process filterAlignedScaffoldsAllvAllCoarse {
 
     script:
     """
-    fpa drop -l "${params.minalign}" aligned.paf > filtered.paf
+    fpa drop -l "${params.min_alnlen_one}" < aligned.paf > filtered.paf
     """
 }
 
