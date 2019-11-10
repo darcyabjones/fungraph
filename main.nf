@@ -29,9 +29,11 @@ params.complete_genomes = false
 params.minigraph_preset = "ggs"
 params.max_ns = 50
 params.min_alnlen_one = 50000
-params.min_alnlen_two = 10000
+params.min_alnlen_two = 5000
 params.min_contig = params.min_alnlen_two
 params.min_coverage = 0.9
+params.min_bubble = 30
+
 
 if ( !(params.genomes || params.complete_genomes) ) {
     log.error "Please provide some genomes."
@@ -172,7 +174,7 @@ preprocessedCompleteGenomes.set { completeGenomes4CombineGenomes }
  */
 process combineGenomes {
 
-    label "posix"
+    label "python3"
     label "small_task"
 
     time "3h"
@@ -185,24 +187,25 @@ process combineGenomes {
 
     output:
     file "soft_masked.fasta" into softMasked
+    file "soft_masked.bed" into softMaskedBed
     file "hard_masked.fasta" into hardMasked
 
     script:
     """
     cat in/*.fasta > soft_masked.fasta
+    softmask_to_bed.py soft_masked.fasta > soft_masked.bed
     sed -E '/^>/!s/[atgcryswkmbdhvn]/N/g' soft_masked.fasta > hard_masked.fasta
     """
 }
 
 
 softMasked.into {
+    softMasked4AlignScaffoldsAllVAll;
     softMasked4SquishAlignmentsCoarse;
     softMasked4RealignScaffoldsToComponents;
     softMasked4SelectScaffoldsToComponents;
     softMasked4SquishAlignmentsFine;
 }
-
-hardMasked.set { hardMasked4AlignScaffoldsAllVAll }
 
 
 // Minimap2
@@ -217,7 +220,7 @@ process alignScaffoldsAllVAll {
     time "12h"
 
     input:
-    file "in.fasta" from hardMasked4AlignScaffoldsAllVAll
+    file "in.fasta" from softMasked4AlignScaffoldsAllVAll
 
     output:
     file "aligned.paf" into alignedScaffoldsAllVAll
@@ -242,18 +245,29 @@ process alignScaffoldsAllVAll {
 // Useful to reduce complexity of seqwish graph construction.
 process filterAlignedScaffoldsAllvAllCoarse {
 
-    label "fpa"
+    label "python3"
     label "small_task"
 
     input:
     file "aligned.paf" from alignedScaffoldsAllVAll
+    file "repeats.bed" from softMaskedBed
 
     output:
     file "filtered.paf" into filteredAlignedScaffoldsAllVAll
 
     script:
     """
-    fpa drop -l "${params.min_alnlen_one}" < aligned.paf > filtered.paf
+    filter_paf.py repeats --sep "." aligned.paf > duplications.bed
+    cat repeats.bed duplications.bed > combined_repeats.bed
+
+    filter_paf.py filter \
+      --min-length "${params.min_alnlen_one}" \
+      --prop-overlap 0.4 \
+      combined_repeats.bed \
+      aligned.paf \
+    > filtered.paf
+
+    #       --sep "."
     """
 }
 
@@ -298,6 +312,8 @@ process gfa2InitialComponentGFAs {
     label "vg"
     label "medium_task"
     time "5h"
+
+    publishDir "${params.outdir}/initial/component_gfas"
 
     input:
     file "pan.gfa" from squishedAlignments
@@ -379,6 +395,7 @@ process selectBestContigsForComponents {
     set file("in.fasta"),
         file("gafs/*") from softMasked4SelectScaffoldsToComponents
             .combine(alignedComponentContigs.map { c, g -> g }.collect().toList())
+            .first()
 
     output:
     set file("fasta_components/*.fasta") into bestContigsForComponents mode flatten
@@ -408,75 +425,215 @@ process selectBestContigsForComponents {
 }
 
 
-// /*
-//  * ODGI
-//  * url: https://github.com/vgteam/odgi
-//  */
-// process gfa2ODGI {
+bestContigsForComponents
+    .map { s -> [s.baseName, s] }
+    .into { bestContigsForComponents4Align; bestContigsForComponents4Squish }
+
+
+// Minimap2
+// url: https://github.com/lh3/minimap2
+// doi: 10.1093/bioinformatics/bty191
 //
-//     label "odgi"
-//     label "small_task"
-//     time "5h"
+// Does pairwise alignments of genomes.
+process alignComponentScaffoldsAllVAll {
+
+    label "minimap2"
+    label "big_task"
+    time "12h"
+
+    tag "${component}"
+
+    input:
+    set val(component), file("in.fasta") from bestContigsForComponents4Align
+
+    output:
+    set val(component),
+        file("aligned.paf") into alignedComponentScaffoldsAllVAll
+
+    script:
+    """
+    minimap2 \
+      -cx asm20 \
+      -DP \
+      --dual=no \
+      -t "${task.cpus}" \
+      in.fasta in.fasta \
+    > aligned.paf
+    """
+}
+
+
+// fpa
+// url: https://github.com/natir/fpa
 //
-//     publishDir "${params.outdir}"
-//
-//     when:
-//     params.assembler == "seqwish"
-//
-//     input:
-//     file "pan.gfa" from squishedAlignments
-//
-//     output:
-//     file "pan.dg" into odgiGraph
-//
-//     script:
-//     """
-//     odgi build -g pan.gfa -o - -p | odgi sort -i - -o pan.dg
-//     """
-// }
-//
-//
-// odgiGraph.into {
-//     odgiGraph4VisualiseGraph;
-//     odgiGraph4SimplifyGraph;
-// }
-//
-// /*
-//  * ODGI
-//  * url: https://github.com/vgteam/odgi
-//  *
-//  * Makes this interesting plot.
-//  */
-// process visualiseGraph {
-//
-//     label "odgi"
-//     label "big_task"
-//     time "2h"
-//
-//     publishDir "${params.outdir}"
-//
-//     when:
-//     params.assembler == "seqwish"
-//
-//     input:
-//     file "pan.dg" from odgiGraph4VisualiseGraph
-//
-//     output:
-//     file "pan.png"
-//
-//     script:
-//     """
-//     odgi viz \
-//       --threads "${task.cpus}" \
-//       -i pan.dg \
-//       -x 4000 \
-//       -y 800 \
-//       -L 0.5 \
-//       -A=SN15 \
-//       --show-strand \
-//       -X 1 \
-//       -P 10 \
-//       -R \
-//       -o pan.png
-//     """
-// }
+// Filter minimap output to only include long alignments.
+// Useful to reduce complexity of seqwish graph construction.
+process filterAlignedScaffoldsAllvAllFine {
+
+    label "python3"
+    label "small_task"
+    time "2h"
+
+    tag "${component}"
+
+    input:
+    set val(component),
+        file("aligned.paf") from alignedComponentScaffoldsAllVAll
+    file "repeats.bed" from softMaskedBed
+
+    output:
+    set val(component),
+        file("filtered.paf") into filteredAlignedComponentScaffoldsAllVAll
+
+    script:
+    """
+    filter_paf.py repeats --sep "." aligned.paf > duplications.bed
+    cat repeats.bed duplications.bed > combined_repeats.bed
+
+    filter_paf.py filter \
+      --min-length "${params.min_alnlen_two}" \
+      --prop-overlap 0.4 \
+      combined_repeats.bed \
+      aligned.paf \
+    > filtered.paf
+
+    #       --sep "."
+    """
+}
+
+
+/*
+ * seqwish
+ * url: https://github.com/ekg/seqwish
+ *
+ * This "squishes" alignments into a graph.
+ */
+process squishAlignmentsFine {
+
+    label "seqwish"
+    label "big_task"
+    time "1d"
+
+    publishDir "${params.outdir}/fine"
+
+    tag "${component}"
+
+    input:
+    set val(component),
+        file("genomes.fasta"),
+        file("alignments.paf") from bestContigsForComponents4Squish
+            .combine(filteredAlignedComponentScaffoldsAllVAll, by: 0)
+
+    output:
+    set val(component), file("${component}.gfa") into squishedComponentAlignments
+
+    script:
+    """
+    seqwish \
+      -s "genomes.fasta" \
+      -p "alignments.paf" \
+      -g "${component}.gfa" \
+      --threads "${task.cpus}"
+    """
+}
+
+
+/*
+ * ODGI
+ * url: https://github.com/vgteam/odgi
+ */
+process gfa2ODGI {
+
+    label "odgi"
+    label "small_task"
+    time "5h"
+
+    publishDir "${params.outdir}/fine"
+    tag "${component}"
+
+    input:
+    set val(component),
+        file("pan.gfa") from squishedComponentAlignments
+
+    output:
+    set val(component),
+        file("${component}.dg") into odgiGraph
+
+    script:
+    """
+    odgi build -g pan.gfa -o - -p | odgi sort -i - -o "${component}.dg"
+    """
+}
+
+
+odgiGraph.into {
+    odgiGraph4VisualiseGraph;
+    odgiGraph4GetBins;
+}
+
+/*
+ * ODGI
+ * url: https://github.com/vgteam/odgi
+ *
+ * Makes this interesting plot.
+ */
+process visualiseGraph {
+
+    label "odgi"
+    label "small_task"
+    time "2h"
+
+    publishDir "${params.outdir}/fine"
+
+    tag "${component}"
+
+    input:
+    set val(component),
+        file("pan.dg") from odgiGraph4VisualiseGraph
+
+    output:
+    file "${component}.png"
+
+    script:
+    """
+    odgi viz \
+      --threads "${task.cpus}" \
+      -i pan.dg \
+      -x 4000 \
+      -y 800 \
+      -L 0 \
+      -X 1 \
+      -P 10 \
+      -R \
+      -o "${component}.png"
+    """
+}
+
+
+process getBins {
+
+    label "odgi"
+    label "small_task"
+    time "2h"
+
+    publishDir "${params.outdir}/fine/bins"
+    tag "${component}"
+
+    input:
+    set val(component),
+        file("pan.dg") from odgiGraph4GetBins
+
+    output:
+    set val(component),
+        file("${component}.json")
+
+    script:
+    """
+    odgi bin \
+        -i pan.dg \
+        --json \
+        --bin-width 10000 \
+        --path-delim "." \
+    > "${component}.json"
+    """
+}

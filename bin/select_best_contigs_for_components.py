@@ -39,6 +39,13 @@ def cli(prog, args):
               "be included. Excluded contig names will be printed to stderr."),
     )
 
+    parser.add_argument(
+        "-n", "--min-scaffolds",
+        default=2,
+        type=int,
+        help="The minimum number of scaffolds assigned to a contig."
+    )
+
     return parser.parse_args(args)
 
 
@@ -80,14 +87,52 @@ def main():
         count = sum((i.end - i.begin for i in itree))
         coverages[query].append((component, count / qlens[query]))
 
+    best_components = defaultdict(list)
+
     for query, components in coverages.items():
-        max_cov = max((cv for cp, cv in components))
+        matches = [cv for cp, cv in components]
+
+        if len(matches) > 0:
+            max_cov = max(matches)
+        else:
+            max_cov = 0
 
         if max_cov < args.min_coverage:
-            print(f"unplaced\t{query}\t{max_cov}", file=args.outfile)
+            best_components["unplaced"].append((query, max_cov))
         else:
             max_comp = [cp for cp, cv in components if cv == max_cov][0]
-            print(f"{max_comp}\t{query}\t{max_cov}", file=args.outfile)
+            best_components[max_comp].append((query, max_cov))
+
+    to_reassign = []
+    to_drop = set()
+    for component, assigned in best_components.items():
+        if component == "unplaced":
+            continue
+
+        if len(assigned) < args.min_scaffolds:
+            to_reassign.extend([s for s, c in assigned])
+            to_drop.add(component)
+
+    for component in to_drop:
+        del best_components[component]
+
+    for query in to_reassign:
+        components = coverages[query]
+        matches = [cv for cp, cv in components if cp not in to_drop]
+        if len(matches) > 0:
+            max_cov = max(matches)
+        else:
+            max_cov = 0
+
+        if max_cov < args.min_coverage:
+            best_components["unplaced"].append((query, max_cov))
+        else:
+            max_comp = [cp for cp, cv in components if cv == max_cov][0]
+            best_components[max_comp].append((query, max_cov))
+
+    for component, coverages in best_components.items():
+        for query, max_cov in coverages:
+            print(f"{component}\t{query}\t{max_cov}", file=args.outfile)
 
     return
 
