@@ -98,9 +98,7 @@ process preprocessGenomes {
 }
 
 
-preprocessedGenomes.set {
-    preprocessedGenomes4UnscaffoldGenomes;
-}
+preprocessedGenomes.set { preprocessedGenomes4UnscaffoldGenomes }
 
 
 /*
@@ -398,8 +396,8 @@ process selectBestContigsForComponents {
             .first()
 
     output:
-    set file("fasta_components/*.fasta") into bestContigsForComponents mode flatten
-    set file("unplaced_contigs.fasta") into unplacedContigs optional true
+    file "fasta_components/*.fasta" into bestContigsForComponents mode flatten
+    file "unplaced_contigs.fasta" into unplacedContigs optional true
     file "contigs_to_components.tsv"
 
     script:
