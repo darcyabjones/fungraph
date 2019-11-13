@@ -178,8 +178,7 @@ process combineGenomes {
     time "3h"
 
     input:
-    file "in/*.fasta" from completeGenomes4CombineGenomes
-        .mix( genomes4CombineGenomes )
+    file "in/*.fasta" from genomes4CombineGenomes
         .map { n, f -> f }
         .collect()
 
@@ -199,10 +198,48 @@ process combineGenomes {
 
 softMasked.into {
     softMasked4AlignScaffoldsAllVAll;
-    softMasked4SquishAlignmentsCoarse;
     softMasked4RealignScaffoldsToComponents;
     softMasked4SelectScaffoldsToComponents;
     softMasked4SquishAlignmentsFine;
+}
+
+
+/*
+ * All genomes need to be in the same file for minimap
+ * all-vs-all alignment.
+ */
+process combineCompleteGenomes {
+
+    label "python3"
+    label "small_task"
+
+    time "3h"
+
+    input:
+    file "in/*.fasta" from completeGenomes4CombineGenomes
+        .map { n, f -> f }
+        .collect()
+
+    output:
+    file "soft_masked.fasta" into softMaskedComplete
+    file "soft_masked.bed" into softMaskedBedComplete
+
+    script:
+    """
+    cat in/*.fasta > soft_masked.fasta
+    softmask_to_bed.py soft_masked.fasta > soft_masked.bed
+    sed -E '/^>/!s/[atgcryswkmbdhvn]/N/g' soft_masked.fasta > hard_masked.fasta
+    """
+}
+
+
+softMaskedComplete.into {
+    softMaskedComplete4AlignCompleteScaffoldsAllVAll;
+    softMaskedComplete4SquishAlignmentsCoarse;
+    softMaskedComplete4RealignScaffoldsToComponents;
+    softMaskedComplete4SelectScaffoldsToComponents;
+    softMaskedComplete4AlignScaffoldsAllVAll;
+    softMaskedComplete4SquishAlignmentsFine;
 }
 
 
@@ -211,17 +248,17 @@ softMasked.into {
 // doi: 10.1093/bioinformatics/bty191
 //
 // Does pairwise alignments of genomes.
-process alignScaffoldsAllVAll {
+process alignCompleteScaffoldsAllVAll {
 
     label "minimap2"
     label "big_task"
     time "12h"
 
     input:
-    file "in.fasta" from softMasked4AlignScaffoldsAllVAll
+    file "in.fasta" from softMasked4AlignCompleteScaffoldsAllVAll
 
     output:
-    file "aligned.paf" into alignedScaffoldsAllVAll
+    file "aligned.paf" into alignedCompleteScaffoldsAllVAll
 
     script:
     """
@@ -358,8 +395,10 @@ process findComponentContigsAlign {
     input:
     set val(component),
         file("component.gfa"),
-        file("in.fasta") from initialComponentGFAs
+        file("complete_genomes.fasta") from initialComponentGFAs
+        file("genomes.fasta") from initialComponentGFAs
             .map { g -> [g.baseName, g] }
+            .combine(softMaskedComplete4RealignScaffoldsToComponents)
             .combine(softMasked4RealignScaffoldsToComponents)
 
     output:
@@ -374,7 +413,8 @@ process findComponentContigsAlign {
       -t "${task.cpus}" \
       -o "${component}.gaf" \
       component.gfa \
-      in.fasta
+      complete_genomes.fasta \
+      genomes.fasta
     """
 }
 
@@ -390,8 +430,10 @@ process selectBestContigsForComponents {
     publishDir "${params.outdir}/initial"
 
     input:
-    set file("in.fasta"),
-        file("gafs/*") from softMasked4SelectScaffoldsToComponents
+    set file("complete_genomes.fasta"),
+        file("genomes.fasta")
+        file("gafs/*") from softMaskedComplete4SelectScaffoldsToComponents
+            .combine(softMasked4SelectScaffoldsToComponents)
             .combine(alignedComponentContigs.map { c, g -> g }.collect().toList())
             .first()
 
@@ -476,8 +518,11 @@ process filterAlignedScaffoldsAllvAllFine {
 
     input:
     set val(component),
-        file("aligned.paf") from alignedComponentScaffoldsAllVAll
-    file "repeats.bed" from softMaskedBed
+        file("aligned.paf"),
+        file("complete_repeats.bed"),
+        file("repeats.bed") from alignedComponentScaffoldsAllVAll
+            .combine(softMaskedBedComplete)
+            .combine(softMaskedBed)
 
     output:
     set val(component),
@@ -486,7 +531,7 @@ process filterAlignedScaffoldsAllvAllFine {
     script:
     """
     filter_paf.py repeats --sep "." aligned.paf > duplications.bed
-    cat repeats.bed duplications.bed > combined_repeats.bed
+    cat complete_repeats.bed repeats.bed duplications.bed > combined_repeats.bed
 
     filter_paf.py filter \
       --min-length "${params.min_alnlen_two}" \
