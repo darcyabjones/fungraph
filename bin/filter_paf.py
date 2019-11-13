@@ -221,7 +221,7 @@ def filter_by_interval(itree, interval, min_length, prop_coverage):
     else:
         prop_intersect = len_intersect / interval.length()
 
-    return (len_intersect < min_length) and (prop_intersect >= prop_coverage)
+    return ((interval.length() - len_intersect) < min_length) or (prop_intersect >= prop_coverage)
 
 
 def cli(prog, args):

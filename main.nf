@@ -92,7 +92,7 @@ process preprocessGenomes {
     awk -v name="${name}" '
         /^>/ { print ">" name "." substr(\$1, 2) }
         \$0 !~ />/ { print }
-    ' in.fasta \
+    ' < "in.fasta" \
     > "out.fasta"
     """
 }
@@ -156,7 +156,7 @@ process preprocessCompleteGenomes {
     awk -v name="${name}" '
         /^>/ { print ">" name "." substr(\$1, 2) }
         \$0 !~ />/ { print }
-    ' in.fasta \
+    ' < "in.fasta" \
     > "${name}.fasta"
     """
 }
@@ -260,7 +260,7 @@ process filterAlignedScaffoldsAllvAllCoarse {
 
     filter_paf.py filter \
       --min-length "${params.min_alnlen_one}" \
-      --prop-overlap 0.4 \
+      --prop-overlap 0.8 \
       combined_repeats.bed \
       aligned.paf \
     > filtered.paf
@@ -490,7 +490,7 @@ process filterAlignedScaffoldsAllvAllFine {
 
     filter_paf.py filter \
       --min-length "${params.min_alnlen_two}" \
-      --prop-overlap 0.4 \
+      --prop-overlap 0.8 \
       combined_repeats.bed \
       aligned.paf \
     > filtered.paf
