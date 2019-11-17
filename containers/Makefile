@@ -53,11 +53,14 @@ SPARSEHASH_URL=https://github.com/sparsehash/sparsehash/archive/sparsehash-2.0.3
 
 GFATOOLS_COMMIT=858a87b
 GFATOOLS_REPO=https://github.com/lh3/gfatools.git
-GFATOOLS_PREFIX_ARG=$(INSTALL_BASE)/GFATOOLS/$(GFATOOLS_COMMIT)
+GFATOOLS_PREFIX_ARG=$(INSTALL_BASE)/gfatools/$(GFATOOLS_COMMIT)
+
+PPG_COMMIT=95cebac
+PPG_REPO=https://github.com/darcyabjones/pypafgraph.git
+PPG_PREFIX_ARG=$(INSTALL_BASE)/pypafgraph/$(PPG_COMMIT)
 
 
-
-GENERAL=base python3 minimap2 seqwish fpa odgi vg minigraph gfatools graphaligner
+GENERAL=base python3 minimap2 seqwish fpa odgi vg minigraph gfatools graphaligner ppg
 
 
 all: docker/all singularity/all
@@ -247,6 +250,19 @@ docker/graphaligner: graphaligner.Dockerfile docker/base
 	@touch $@
 
 
+docker/ppg: ppg.Dockerfile docker/base
+	docker build \
+	  --build-arg IMAGE="$(BASE_IMAGE)" \
+	  --build-arg PPG_COMMIT="$(PPG_COMMIT)" \
+	  --build-arg PPG_REPO="$(PPG_REPO)" \
+	  --build-arg PPG_PREFIX_ARG="$(PPG_PREFIX_ARG)" \
+	  --file $< \
+	  -t "$(call make_image_name,$@)" \
+	  .
+	@mkdir -p "$(dir $@)"
+	@touch $@
+
+
 docker/fungraph: docker/fpa docker/minimap2 docker/minigraph docker/odgi
 docker/fungraph: docker/seqwish docker/vg docker/graphaligner
 docker/fungraph: fungraph.Dockerfile docker/base docker/python3
@@ -277,6 +293,9 @@ docker/fungraph: fungraph.Dockerfile docker/base docker/python3
 	  --build-arg GRAPHALIGNER_PREFIX_ARG="$(GRAPHALIGNER_PREFIX_ARG)" \
 	  --build-arg MUMMER_VERSION="$(MUMMER_VERSION)" \
 	  --build-arg MUMMER_PREFIX_ARG="$(MUMMER_PREFIX_ARG)" \
+	  --build-arg PPG_IMAGE="$(call make_image_name,ppg)" \
+	  --build-arg PPG_COMMIT="$(PPG_COMMIT)" \
+	  --build-arg PPG_PREFIX_ARG="$(PPG_PREFIX_ARG)" \
 	  --build-arg PYTHON3_IMAGE="$(call make_image_name,python3)" \
 	  --file $< \
 	  -t "$(call make_image_name,$@)" \

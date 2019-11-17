@@ -6,6 +6,7 @@ ARG ODGI_IMAGE
 ARG SEQWISH_IMAGE
 ARG VG_IMAGE
 ARG GRAPHALIGNER_IMAGE
+ARG PPG_IMAGE
 ARG PYTHON3_IMAGE
 
 FROM "${FPA_IMAGE}" as fpa_builder
@@ -15,6 +16,7 @@ FROM "${ODGI_IMAGE}" as odgi_builder
 FROM "${SEQWISH_IMAGE}" as seqwish_builder
 FROM "${VG_IMAGE}" as vg_builder
 FROM "${GRAPHALIGNER_IMAGE}" as graphaligner_builder
+FROM "${PPG_IMAGE}" as ppg_builder
 FROM "${PYTHON3_IMAGE}" as python3_builder
 
 
@@ -116,6 +118,20 @@ ENV PKG_CONFIG_PATH="${MUMMER_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH}"
 ENV CPATH="${MUMMER_PREFIX}/include:${CPATH}"
 
 COPY --from=graphaligner_builder "${MUMMER_PREFIX}" "${MUMMER_PREFIX}"
+
+
+ARG PPG_COMMIT
+ARG PPG_PREFIX_ARG
+ENV PPG_PREFIX="${PPG_PREFIX_ARG}"
+
+LABEL ppg.version="${PPG_COMMIT}"
+
+ENV PATH "${PPG_PREFIX}/bin:${PATH}"
+ENV PYTHONPATH "${PPG_PREFIX}/lib/python3.7/site-packages:${PYTHONPATH}"
+
+COPY --from=ppg_builder "${PPG_PREFIX}" "${PPG_PREFIX}"
+COPY --from=ppg_builder "${APT_REQUIREMENTS_FILE}" /build/apt/ppg.txt
+
 
 COPY --from=python3_builder "${APT_REQUIREMENTS_FILE}" /build/apt/python3.txt
 

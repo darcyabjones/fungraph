@@ -28,9 +28,8 @@ params.genomes = false
 params.complete_genomes = false
 params.minigraph_preset = "ggs"
 params.max_ns = 50
-params.min_alnlen_one = 50000
-params.min_alnlen_two = 5000
-params.min_contig = params.min_alnlen_two
+params.min_alnlen = 10000
+params.min_contig = 2 * params.min_alnlen
 params.min_coverage = 0.9
 params.min_bubble = 30
 
@@ -172,98 +171,67 @@ preprocessedCompleteGenomes.set { completeGenomes4CombineGenomes }
  */
 process combineGenomes {
 
-    label "python3"
+    label "ppg"
     label "small_task"
 
     time "3h"
 
     input:
     file "in/*.fasta" from genomes4CombineGenomes
+        .mix(completeGenomes4CombineGenomes)
         .map { n, f -> f }
         .collect()
 
     output:
-    file "soft_masked.fasta" into softMasked
+    file "genomes.fasta" into softMasked
     file "soft_masked.bed" into softMaskedBed
     file "hard_masked.fasta" into hardMasked
 
     script:
     """
     cat in/*.fasta > soft_masked.fasta
-    softmask_to_bed.py soft_masked.fasta > soft_masked.bed
+
+    ppg unsoftmask \
+      --outbed soft_masked.bed \
+      --outfasta genomes.fasta \
+      soft_masked.fasta
+
     sed -E '/^>/!s/[atgcryswkmbdhvn]/N/g' soft_masked.fasta > hard_masked.fasta
     """
 }
 
 
 softMasked.into {
-    softMasked4AlignScaffoldsAllVAll;
-    softMasked4RealignScaffoldsToComponents;
+    softMasked4AlignScaffolds;
+    softMasked4FindClusters;
     softMasked4SelectScaffoldsToComponents;
     softMasked4SquishAlignmentsFine;
 }
 
 
-/*
- * All genomes need to be in the same file for minimap
- * all-vs-all alignment.
- */
-process combineCompleteGenomes {
-
-    label "python3"
-    label "small_task"
-
-    time "3h"
-
-    input:
-    file "in/*.fasta" from completeGenomes4CombineGenomes
-        .map { n, f -> f }
-        .collect()
-
-    output:
-    file "soft_masked.fasta" into softMaskedComplete
-    file "soft_masked.bed" into softMaskedBedComplete
-
-    script:
-    """
-    cat in/*.fasta > soft_masked.fasta
-    softmask_to_bed.py soft_masked.fasta > soft_masked.bed
-    sed -E '/^>/!s/[atgcryswkmbdhvn]/N/g' soft_masked.fasta > hard_masked.fasta
-    """
-}
-
-
-softMaskedComplete.into {
-    softMaskedComplete4AlignCompleteScaffoldsAllVAll;
-    softMaskedComplete4SquishAlignmentsCoarse;
-    softMaskedComplete4RealignScaffoldsToComponents;
-    softMaskedComplete4SelectScaffoldsToComponents;
-    softMaskedComplete4AlignScaffoldsAllVAll;
-    softMaskedComplete4SquishAlignmentsFine;
-}
-
-
 // Minimap2
 // url: https://github.com/lh3/minimap2
 // doi: 10.1093/bioinformatics/bty191
 //
 // Does pairwise alignments of genomes.
-process alignCompleteScaffoldsAllVAll {
+process alignScaffolds {
 
     label "minimap2"
     label "big_task"
     time "12h"
 
+    publishDir "${params.outdir}/alignment1"
+
     input:
-    file "in.fasta" from softMasked4AlignCompleteScaffoldsAllVAll
+    file "in.fasta" from softMasked4AlignScaffolds
 
     output:
-    file "aligned.paf" into alignedCompleteScaffoldsAllVAll
+    file "aligned.paf" into alignedScaffolds
 
     script:
     """
     minimap2 \
-      -cx asm20 \
+      -cx asm10 \
       -DP \
       --dual=no \
       -t "${task.cpus}" \
@@ -278,196 +246,84 @@ process alignCompleteScaffoldsAllVAll {
 //
 // Filter minimap output to only include long alignments.
 // Useful to reduce complexity of seqwish graph construction.
-process filterAlignedScaffoldsAllvAllCoarse {
+process filterAlignedScaffolds {
 
-    label "python3"
+    label "ppg"
     label "small_task"
 
+    publishDir "${params.outdir}/alignment1"
+
     input:
-    file "aligned.paf" from alignedScaffoldsAllVAll
+    file "aligned.paf" from alignedScaffolds
     file "repeats.bed" from softMaskedBed
 
     output:
-    file "filtered.paf" into filteredAlignedScaffoldsAllVAll
+    file "filtered.paf" into filteredAlignedScaffolds
 
     script:
     """
-    filter_paf.py repeats --sep "." aligned.paf > duplications.bed
+    ppg repeats --sep "." aligned.paf > duplications.bed
     cat repeats.bed duplications.bed > combined_repeats.bed
 
-    filter_paf.py filter \
-      --min-length "${params.min_alnlen_one}" \
+    ppg filter \
+      --min-length "${params.min_alnlen}" \
       --prop-overlap 0.8 \
       combined_repeats.bed \
       aligned.paf \
     > filtered.paf
-
-    #       --sep "."
     """
 }
 
 
-/*
- * seqwish
- * url: https://github.com/ekg/seqwish
- *
- * This "squishes" alignments into a graph.
- */
-process squishAlignmentsCoarse {
+process findClusters {
 
-    label "seqwish"
-    label "big_task"
-    time "1d"
-
-    publishDir "${params.outdir}"
-
-    input:
-    set file("genomes.fasta"),
-        file("alignments.paf") from softMasked4SquishAlignmentsCoarse
-            .combine(filteredAlignedScaffoldsAllVAll)
-            .first()
-
-    output:
-    file "pan.gfa" into squishedAlignments
-
-    script:
-    """
-    seqwish \
-      -s "genomes.fasta" \
-      -p "alignments.paf" \
-      -g pan.gfa \
-      --threads "${task.cpus}"
-    """
-}
-
-
-// Splits the graph up into connected components.
-process gfa2InitialComponentGFAs {
-
-    label "vg"
-    label "medium_task"
-    time "5h"
-
-    publishDir "${params.outdir}/initial/component_gfas"
-
-    input:
-    file "pan.gfa" from squishedAlignments
-
-    output:
-    file "initial/*.gfa" into initialComponentGFAs mode flatten
-
-    script:
-    // Parallelisation is limited for this step.
-    """
-    vg view \
-      --vg \
-      --gfa-in pan.gfa \
-      --threads "${task.cpus}" \
-    > pan.vg
-
-    vg explode \
-      --threads "${task.cpus}" \
-      pan.vg \
-      initial
-
-    for v in initial/*.vg
-    do
-      vg view --gfa --vg-in "\${v}" > "\${v%.vg}.gfa"
-    done
-
-    rm pan.vg
-    rm initial/*.vg
-    """
-}
-
-
-// Realign the contigs to the GFA to find ones to re-assemble.
-process findComponentContigsAlign {
-
-    label "minigraph"
-    label "medium_task"
-    time "5h"
-
-    tag "${component}"
-
-    publishDir "${params.outdir}/initial/component_gafs"
-
-    input:
-    set val(component),
-        file("component.gfa"),
-        file("complete_genomes.fasta") from initialComponentGFAs
-        file("genomes.fasta") from initialComponentGFAs
-            .map { g -> [g.baseName, g] }
-            .combine(softMaskedComplete4RealignScaffoldsToComponents)
-            .combine(softMasked4RealignScaffoldsToComponents)
-
-    output:
-    set val(component),
-        file("${component}.gaf") into alignedComponentContigs
-
-    script:
-    """
-    minigraph \
-      -x lr \
-      -N 0 \
-      -t "${task.cpus}" \
-      -o "${component}.gaf" \
-      component.gfa \
-      complete_genomes.fasta \
-      genomes.fasta
-    """
-}
-
-
-// Finds which components have the best coverage for each contig.
-// We'll use this to re-assemble the contigs individually.
-process selectBestContigsForComponents {
-
-    label "python3"
+    label "ppg"
     label "small_task"
-    time "3h"
+    time "12h"
 
-    publishDir "${params.outdir}/initial"
+    publishDir "${params.outdir}/alignment1"
 
     input:
-    set file("complete_genomes.fasta"),
-        file("genomes.fasta")
-        file("gafs/*") from softMaskedComplete4SelectScaffoldsToComponents
-            .combine(softMasked4SelectScaffoldsToComponents)
-            .combine(alignedComponentContigs.map { c, g -> g }.collect().toList())
-            .first()
+    file "in.paf" from filteredAlignedScaffolds
+    file "in.fasta" from softMasked4FindClusters
 
     output:
-    file "fasta_components/*.fasta" into bestContigsForComponents mode flatten
-    file "unplaced_contigs.fasta" into unplacedContigs optional true
-    file "contigs_to_components.tsv"
+    file "clusters/*.fasta" into clusters mode flatten
+    file "unplaced.fasta" into unplacedScaffolds optional true
+    file "clusters.png"
+    file "clusters.tsv"
 
     script:
     """
-    select_best_contigs_for_components.py \
-      --min-coverage "${params.min_coverage}" \
-      --outfile "contigs_to_components.tsv" \
-      gafs/*
+    ppg cluster \
+      --inflation 1.4 \
+      --expansion 4 \
+      --plot clusters.png \
+      --outfile clusters.tsv \
+      in.paf
 
-
-    mkdir -p "fasta_components"
-
-    select_sequences.py \
-      --outdir "fasta_components" \
-      "contigs_to_components.tsv" \
+    ppg selectseqs \
+      --prefix "component" \
+      --outdir clusters \
+      --unplaced "unplaced" \
+      --min-size 3 \
+      clusters.tsv \
       in.fasta
 
-    if [ -s "fasta_components/unplaced.fasta" ]
+    if [ -e clusters/unplaced.fasta ]
     then
-      mv "fasta_components/unplaced.fasta" "unplaced_contigs.fasta"
+      mv clusters/unplaced.fasta unplaced.fasta
     fi
     """
 }
 
 
-bestContigsForComponents
-    .map { s -> [s.baseName, s] }
-    .into { bestContigsForComponents4Align; bestContigsForComponents4Squish }
+clusters
+    .map { f -> [f.simpleName, f] }
+    .into {
+        clusters4AlignComponents;
+        clusters4SquishComponentAlignments;
+    }
 
 
 // Minimap2
@@ -475,20 +331,23 @@ bestContigsForComponents
 // doi: 10.1093/bioinformatics/bty191
 //
 // Does pairwise alignments of genomes.
-process alignComponentScaffoldsAllVAll {
+process alignComponents {
 
     label "minimap2"
     label "big_task"
     time "12h"
 
+    publishDir "${params.outdir}/alignment2"
+
     tag "${component}"
 
     input:
-    set val(component), file("in.fasta") from bestContigsForComponents4Align
+    set val(component),
+        file("in.fasta") from clusters4AlignComponents
 
     output:
     set val(component),
-        file("aligned.paf") into alignedComponentScaffoldsAllVAll
+        file("${component}.paf") into alignedComponents
 
     script:
     """
@@ -498,7 +357,7 @@ process alignComponentScaffoldsAllVAll {
       --dual=no \
       -t "${task.cpus}" \
       in.fasta in.fasta \
-    > aligned.paf
+    > "${component}.paf"
     """
 }
 
@@ -508,39 +367,36 @@ process alignComponentScaffoldsAllVAll {
 //
 // Filter minimap output to only include long alignments.
 // Useful to reduce complexity of seqwish graph construction.
-process filterAlignedScaffoldsAllvAllFine {
+process filterAlignedComponents {
 
-    label "python3"
+    label "ppg"
     label "small_task"
-    time "2h"
+    time "12h"
+
+    publishDir "${params.outdir}/alignment2"
 
     tag "${component}"
 
     input:
     set val(component),
-        file("aligned.paf"),
-        file("complete_repeats.bed"),
-        file("repeats.bed") from alignedComponentScaffoldsAllVAll
-            .combine(softMaskedBedComplete)
-            .combine(softMaskedBed)
+        file("aligned.paf") from alignedComponents
+    file "repeats.bed" from softMaskedBed
 
     output:
     set val(component),
-        file("filtered.paf") into filteredAlignedComponentScaffoldsAllVAll
+        file("${component}_filtered.paf") into filteredAlignedComponents
 
     script:
     """
-    filter_paf.py repeats --sep "." aligned.paf > duplications.bed
-    cat complete_repeats.bed repeats.bed duplications.bed > combined_repeats.bed
+    ppg repeats --sep "." aligned.paf > duplications.bed
+    cat repeats.bed duplications.bed > combined_repeats.bed
 
-    filter_paf.py filter \
-      --min-length "${params.min_alnlen_two}" \
-      --prop-overlap 0.8 \
+    ppg filter \
+      --min-length "${params.min_alnlen}" \
+      --prop-overlap 1.0 \
       combined_repeats.bed \
       aligned.paf \
-    > filtered.paf
-
-    #       --sep "."
+    > "${component}_filtered.paf"
     """
 }
 
@@ -551,31 +407,32 @@ process filterAlignedScaffoldsAllvAllFine {
  *
  * This "squishes" alignments into a graph.
  */
-process squishAlignmentsFine {
+process squishAlignments {
 
     label "seqwish"
     label "big_task"
     time "1d"
 
-    publishDir "${params.outdir}/fine"
+    publishDir "${params.outdir}/alignment2"
 
     tag "${component}"
 
     input:
     set val(component),
-        file("genomes.fasta"),
-        file("alignments.paf") from bestContigsForComponents4Squish
-            .combine(filteredAlignedComponentScaffoldsAllVAll, by: 0)
+        file("in.fasta"),
+        file("alignments.paf") from clusters4SquishComponentAlignments
+            .combine(filteredAlignedComponents, by: 0)
 
     output:
-    set val(component), file("${component}.gfa") into squishedComponentAlignments
+    set val(component),
+        file("${component}.gfa") into squishedAlignments
 
     script:
     """
     seqwish \
-      -s "genomes.fasta" \
+      -s "in.fasta" \
       -p "alignments.paf" \
-      -g "${component}.gfa" \
+      -g pan.gfa \
       --threads "${task.cpus}"
     """
 }
@@ -591,7 +448,7 @@ process gfa2ODGI {
     label "small_task"
     time "5h"
 
-    publishDir "${params.outdir}/fine"
+    publishDir "${params.outdir}/alignment2"
     tag "${component}"
 
     input:
@@ -626,7 +483,7 @@ process visualiseGraph {
     label "small_task"
     time "2h"
 
-    publishDir "${params.outdir}/fine"
+    publishDir "${params.outdir}/alignment2"
 
     tag "${component}"
 
@@ -659,7 +516,7 @@ process getBins {
     label "small_task"
     time "2h"
 
-    publishDir "${params.outdir}/fine/bins"
+    publishDir "${params.outdir}/alignment2"
     tag "${component}"
 
     input:
