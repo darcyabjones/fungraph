@@ -30,7 +30,7 @@ params.minigraph_preset = "ggs"
 params.max_ns = 50
 params.min_alnlen = 10000
 params.min_contig = 2 * params.min_alnlen
-params.min_coverage = 0.9
+params.min_cluster_size = 3
 params.min_bubble = 30
 
 
@@ -57,52 +57,11 @@ if ( params.complete_genomes ) {
     completeGenomes = Channel.empty()
 }
 
-completeGenomes.into {
-    completeGenomes4PreprocessGenomes;
-    completeGenomes4CallMinimapVariants;
-}
-
-
-genomes.into {
-    genomes4PreprocessGenomes;
-    genomes4CallMinimapVariants;
-}
-
 
 /*
  * Add the genome name to the beginning of each sequence.
  */
 process preprocessGenomes {
-
-    label "posix"
-    label "small_task"
-    time "1h"
-
-    tag "${name}"
-
-    input:
-    set val(name), file("in.fasta") from genomes4PreprocessGenomes
-
-    output:
-    set val(name), file("out.fasta") into preprocessedGenomes
-
-    script:
-    """
-    awk -v name="${name}" '
-        /^>/ { print ">" name "." substr(\$1, 2) }
-        \$0 !~ />/ { print }
-    ' < "in.fasta" \
-    > "out.fasta"
-    """
-}
-
-
-preprocessedGenomes.set { preprocessedGenomes4UnscaffoldGenomes }
-
-
-/*
- */
-process unscaffoldGenomes {
 
     label "python3"
     label "small_task"
@@ -113,20 +72,26 @@ process unscaffoldGenomes {
     tag "${name}"
 
     input:
-    set val(name),
-        file("in.fasta") from preprocessedGenomes4UnscaffoldGenomes
+    set val(name), file("in.fasta") from genomes
 
     output:
-    set val(name),
-        file("${name}.fasta") into unscaffoldedGenomes
+    set val(name), file("${name}.fasta") into unscaffoldedGenomes
 
     script:
     """
+    awk -v name="${name}" '
+        /^>/ { print ">" name "." substr(\$1, 2) }
+        \$0 !~ />/ { print }
+    ' < "in.fasta" \
+    > "out.fasta"
+
     split_at_n_stretch.py \
       --nsize "${params.max_ns}" \
       --min-length "${params.min_contig}" \
       -o "${name}.fasta" \
       in.fasta
+
+    rm out.fasta
     """
 }
 
@@ -145,7 +110,7 @@ process preprocessCompleteGenomes {
     tag "${name}"
 
     input:
-    set val(name), file("in.fasta") from completeGenomes4PreprocessGenomes
+    set val(name), file("in.fasta") from completeGenomes
 
     output:
     set val(name), file("${name}.fasta") into preprocessedCompleteGenomes
@@ -173,7 +138,6 @@ process combineGenomes {
 
     label "ppg"
     label "small_task"
-
     time "3h"
 
     input:
@@ -204,8 +168,6 @@ process combineGenomes {
 softMasked.into {
     softMasked4AlignScaffolds;
     softMasked4FindClusters;
-    softMasked4SelectScaffoldsToComponents;
-    softMasked4SquishAlignmentsFine;
 }
 
 
@@ -241,15 +203,12 @@ process alignScaffolds {
 }
 
 
-// fpa
-// url: https://github.com/natir/fpa
-//
-// Filter minimap output to only include long alignments.
-// Useful to reduce complexity of seqwish graph construction.
+// Filter out alignments that are only in repeat regions or are shorter than the min length.
 process filterAlignedScaffolds {
 
     label "ppg"
     label "small_task"
+    time "6h"
 
     publishDir "${params.outdir}/alignment1"
 
@@ -275,6 +234,7 @@ process filterAlignedScaffolds {
 }
 
 
+// Cluster the alignments to find components.
 process findClusters {
 
     label "ppg"
@@ -306,7 +266,7 @@ process findClusters {
       --prefix "component" \
       --outdir clusters \
       --unplaced "unplaced" \
-      --min-size 3 \
+      --min-size "${params.min_cluster_size}" \
       clusters.tsv \
       in.fasta
 
@@ -330,7 +290,7 @@ clusters
 // url: https://github.com/lh3/minimap2
 // doi: 10.1093/bioinformatics/bty191
 //
-// Does pairwise alignments of genomes.
+// Does pairwise alignments of genomes within components.
 process alignComponents {
 
     label "minimap2"
@@ -362,16 +322,12 @@ process alignComponents {
 }
 
 
-// fpa
-// url: https://github.com/natir/fpa
-//
-// Filter minimap output to only include long alignments.
-// Useful to reduce complexity of seqwish graph construction.
+// Filter out alignments that are only in repeat regions or are shorter than the min length.
 process filterAlignedComponents {
 
     label "ppg"
     label "small_task"
-    time "12h"
+    time "6h"
 
     publishDir "${params.outdir}/alignment2"
 
@@ -379,8 +335,8 @@ process filterAlignedComponents {
 
     input:
     set val(component),
-        file("aligned.paf") from alignedComponents
-    file "repeats.bed" from softMaskedBed
+        file("aligned.paf"),
+    	file("repeats.bed") from alignedComponents.combine(softMaskedBed)
 
     output:
     set val(component),
