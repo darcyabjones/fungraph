@@ -89,7 +89,7 @@ process preprocessGenomes {
       --nsize "${params.max_ns}" \
       --min-length "${params.min_contig}" \
       -o "${name}.fasta" \
-      in.fasta
+      out.fasta
 
     rm out.fasta
     """
@@ -366,7 +366,7 @@ process filterAlignedComponents {
 process squishAlignments {
 
     label "seqwish"
-    label "big_task"
+    label "biggish_task"
     time "1d"
 
     publishDir "${params.outdir}/alignment2"
@@ -388,9 +388,14 @@ process squishAlignments {
     seqwish \
       -s "in.fasta" \
       -p "alignments.paf" \
-      -g pan.gfa \
+      -g "${component}.gfa" \
       --threads "${task.cpus}"
     """
+}
+
+
+squishedAlignments.set {
+    squishedAlignments4ODGI;
 }
 
 
@@ -409,7 +414,7 @@ process gfa2ODGI {
 
     input:
     set val(component),
-        file("pan.gfa") from squishedComponentAlignments
+        file("pan.gfa") from squishedAlignments4ODGI
 
     output:
     set val(component),
