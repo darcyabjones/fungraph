@@ -89,7 +89,7 @@ process preprocessGenomes {
       --nsize "${params.max_ns}" \
       --min-length "${params.min_contig}" \
       -o "${name}.fasta" \
-      in.fasta
+      out.fasta
 
     rm out.fasta
     """
@@ -367,7 +367,7 @@ process filterAlignedComponents {
 process squishAlignments {
 
     label "seqwish"
-    label "big_task"
+    label "biggish_task"
     time "1d"
 
 
@@ -388,9 +388,14 @@ process squishAlignments {
     seqwish \
       -s "in.fasta" \
       -p "alignments.paf" \
-      -g pan.gfa \
+      -g "${component}.gfa" \
       --threads "${task.cpus}"
     """
+}
+
+
+squishedAlignments.set {
+    squishedAlignments4ODGI;
 }
 
 
