@@ -2,6 +2,7 @@ ARG IMAGE
 ARG FPA_IMAGE
 ARG MINIMAP2_IMAGE
 ARG MINIGRAPH_IMAGE
+ARG GFATOOLS_IMAGE
 ARG ODGI_IMAGE
 ARG SEQWISH_IMAGE
 ARG VG_IMAGE
@@ -12,6 +13,7 @@ ARG PYTHON3_IMAGE
 FROM "${FPA_IMAGE}" as fpa_builder
 FROM "${MINIMAP2_IMAGE}" as minimap2_builder
 FROM "${MINIGRAPH_IMAGE}" as minigraph_builder
+FROM "${GFATOOLS_IMAGE}" as gfatools_builder
 FROM "${ODGI_IMAGE}" as odgi_builder
 FROM "${SEQWISH_IMAGE}" as seqwish_builder
 FROM "${VG_IMAGE}" as vg_builder
@@ -48,6 +50,18 @@ ENV PATH "${MINIMAP2_PREFIX}/bin:${K8_PREFIX}/bin:${PATH}"
 COPY --from=minimap2_builder "${MINIMAP2_PREFIX}" "${MINIMAP2_PREFIX}"
 COPY --from=minimap2_builder "${K8_PREFIX}" "${K8_PREFIX}"
 COPY --from=minimap2_builder "${APT_REQUIREMENTS_FILE}" /build/apt/minimap2.txt
+
+
+ARG GFATOOLS_COMMIT
+ARG GFATOOLS_PREFIX_ARG
+ENV GFATOOLS_PREFIX="${GFATOOLS_PREFIX_ARG}"
+
+LABEL gfatools.version="${GFATOOLS_COMMIT}"
+
+ENV PATH="${GFATOOLS_PREFIX}/bin:${PATH}"
+
+COPY --from=gfatools_builder "${GFATOOLS_PREFIX}" "${GFATOOLS_PREFIX}"
+COPY --from=gfatools_builder "${APT_REQUIREMENTS_FILE}" /build/apt/gfatools.txt
 
 
 ARG MINIGRAPH_COMMIT

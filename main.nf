@@ -283,6 +283,7 @@ clusters
     .into {
         clusters4AlignComponents;
         clusters4SquishComponentAlignments;
+        clusters4RealignAgainstGraph;
     }
 
 
@@ -336,7 +337,7 @@ process filterAlignedComponents {
     input:
     set val(component),
         file("aligned.paf"),
-    	file("repeats.bed") from alignedComponents.combine(softMaskedBed)
+        file("repeats.bed") from alignedComponents.combine(softMaskedBed)
 
     output:
     set val(component),
@@ -369,7 +370,6 @@ process squishAlignments {
     label "big_task"
     time "1d"
 
-    publishDir "${params.outdir}/alignment2"
 
     tag "${component}"
 
@@ -395,6 +395,169 @@ process squishAlignments {
 
 
 /*
+ * The squished graph has ~2x the sequence content and is too complex for vg.
+ * This removes simple bubbles, then bubbles shorter than 50bp.
+ * I do seem to get different results with this, rather than just using -B.
+ * `-B` is used to avoid tip-trimming.
+ */
+process popBubbles {
+
+    label "gfatools"
+    label "small_task"
+    time "1h"
+
+    tag "${component}"
+    input:
+    set val(component),
+        file("in.gfa") from squishedAlignments
+
+    output:
+    set val(component),
+        file("${component}.gfa") into poppedGraph
+
+    script:
+    """
+    gfatools asm -s -l 50 -B in.gfa > "${component}.gfa"
+    """
+}
+
+
+process simplifyGraph {
+
+    label "vg"
+    label "small_task"
+    time "2h"
+
+    tag "${component}"
+
+    input:
+    set val(component),
+        file("in.gfa") from poppedGraph
+
+    output:
+    set val(component),
+        file("${component}.vg") into simplifiedGraph
+
+    script:
+    """
+    vg view --vg --gfa-in in.gfa > in.vg
+    vg mod --unfold 1 in.vg > unfolded.vg
+    vg mod --dagify-step 1 unfolded.vg > dagified.vg
+    vg mod --until-normal 10 dagified.vg > "${component}.vg"
+
+    rm in.vg unfolded.vg dagified.vg
+    """
+}
+
+
+process combineGraph {
+
+    label "vg"
+    label "small_task"
+    time "2h"
+
+    input:
+    file "components/*.vg" from simplifiedGraph.map { c, g -> g }.collect()
+
+    output:
+    file "combined.vg" into combinedGraph
+
+    script:
+    """
+    # This is to avoid mutating and messing up checkpoints.
+    cp -rL components new_components
+
+    vg ids --join --compact --sort new_components/*.vg
+    cat new_components/*.vg > combined.vg
+    """
+}
+
+
+combinedGraph.into {
+    combinedGraph4RealignAgainstGraph;
+    combinedGraph4AugmentGraph;
+}
+
+
+process realignAgainstGraph {
+
+    label "graphaligner"
+    label "medium_task"
+    time "12h"
+
+    tag "${component}"
+
+    input:
+    set val(component),
+        file("contigs.fasta"),
+        file("combined.vg") from clusters4RealignAgainstGraph
+            .mix( unplacedScaffolds.map { f -> [f.simpleName, f] } )
+            .combine(combinedGraph)
+
+    output:
+    set val(component),
+        file("out.gam") into realignedAgainstGraph
+
+    script:
+    """
+    GraphAligner \
+      --graph combined.vg \
+      --reads contigs.fasta \
+      --alignments-out out.gam \
+      --threads "${task.cpus}" \
+      --seeds-mem-count -1 \
+      --seeds-mxm-length 20 \
+      --tangle-effort 100000
+    """
+}
+
+
+process augmentGraph {
+
+    label "vg"
+    label "medium_task"
+    time "12h"
+
+    publishDir "${params.outdir}/alignment2"
+
+    input:
+    file "in.vg" from combinedGraph4AugmentGraph
+    file "alignments/*.gam" from realignAgainstGraph
+        .map { c, g -> g }
+        .collect()
+
+    output:
+    file "pan.gfa"
+    file "components/*.gfa" into augmentedComponents mode flatten
+    file "pan.vg"
+
+    script:
+    """
+    cat alignments/*.gam > alignments.gam
+
+    vg augment \
+      --label-paths \
+      --progress \
+      --threads "${task.cpus}" \
+      in.vg \
+      alignments.gam \
+    > pan.vg
+
+    vg view --gfa --vg-in pan.vg > pan.gfa
+
+    vg explode pan.vg augmented
+
+    mkdir -p components
+    for f in augmented/*.vg
+    do
+      FNAME="\$(basename \${f%.*}}"
+      vg view --gfa --vg-in "\${f}" > "components/\${FNAME}.gfa"
+    done
+    """
+}
+
+
+/*
  * ODGI
  * url: https://github.com/vgteam/odgi
  */
@@ -409,7 +572,8 @@ process gfa2ODGI {
 
     input:
     set val(component),
-        file("pan.gfa") from squishedComponentAlignments
+        file("pan.gfa") from augmentedComponents
+            .map { f -> [f.simpleName, f] }
 
     output:
     set val(component),
@@ -426,6 +590,7 @@ odgiGraph.into {
     odgiGraph4VisualiseGraph;
     odgiGraph4GetBins;
 }
+
 
 /*
  * ODGI
