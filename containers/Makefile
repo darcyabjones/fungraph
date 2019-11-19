@@ -55,7 +55,7 @@ GFATOOLS_COMMIT=858a87b
 GFATOOLS_REPO=https://github.com/lh3/gfatools.git
 GFATOOLS_PREFIX_ARG=$(INSTALL_BASE)/gfatools/$(GFATOOLS_COMMIT)
 
-PPG_COMMIT=95cebac
+PPG_COMMIT=065df42
 PPG_REPO=https://github.com/darcyabjones/pypafgraph.git
 PPG_PREFIX_ARG=$(INSTALL_BASE)/pypafgraph/$(PPG_COMMIT)
 
