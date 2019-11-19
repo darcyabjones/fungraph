@@ -51,7 +51,7 @@ BBHASH_REPO=https://github.com/maickrau/BBHash.git
 JEMALLOC_URL=https://github.com/jemalloc/jemalloc/releases/download/5.1.0/jemalloc-5.1.0.tar.bz2
 SPARSEHASH_URL=https://github.com/sparsehash/sparsehash/archive/sparsehash-2.0.3.tar.gz
 
-GFATOOLS_COMMIT=858a87b
+GFATOOLS_COMMIT=5f7fe55
 GFATOOLS_REPO=https://github.com/lh3/gfatools.git
 GFATOOLS_PREFIX_ARG=$(INSTALL_BASE)/gfatools/$(GFATOOLS_COMMIT)
 
@@ -279,6 +279,9 @@ docker/fungraph: fungraph.Dockerfile docker/base docker/python3
 	  --build-arg MINIGRAPH_IMAGE="$(call make_image_name,minigraph)" \
 	  --build-arg MINIGRAPH_COMMIT="$(MINIGRAPH_COMMIT)" \
 	  --build-arg MINIGRAPH_PREFIX_ARG="$(MINIGRAPH_PREFIX_ARG)" \
+	  --build-arg GFATOOLS_IMAGE="$(call make_image_name,gfatools)" \
+	  --build-arg GFATOOLS_COMMIT="$(GFATOOLS_COMMIT)" \
+	  --build-arg GFATOOLS_PREFIX_ARG="$(GFATOOLS_PREFIX_ARG)" \
 	  --build-arg ODGI_IMAGE="$(call make_image_name,odgi)" \
 	  --build-arg ODGI_COMMIT="$(ODGI_COMMIT)" \
 	  --build-arg ODGI_PREFIX_ARG="$(ODGI_PREFIX_ARG)" \

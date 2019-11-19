@@ -30,7 +30,7 @@ params.minigraph_preset = "ggs"
 params.max_ns = 50
 params.min_alnlen = 10000
 params.min_contig = 2 * params.min_alnlen
-params.min_coverage = 0.9
+params.min_cluster_size = 3
 params.min_bubble = 30
 
 
@@ -57,52 +57,11 @@ if ( params.complete_genomes ) {
     completeGenomes = Channel.empty()
 }
 
-completeGenomes.into {
-    completeGenomes4PreprocessGenomes;
-    completeGenomes4CallMinimapVariants;
-}
-
-
-genomes.into {
-    genomes4PreprocessGenomes;
-    genomes4CallMinimapVariants;
-}
-
 
 /*
  * Add the genome name to the beginning of each sequence.
  */
 process preprocessGenomes {
-
-    label "posix"
-    label "small_task"
-    time "1h"
-
-    tag "${name}"
-
-    input:
-    set val(name), file("in.fasta") from genomes4PreprocessGenomes
-
-    output:
-    set val(name), file("out.fasta") into preprocessedGenomes
-
-    script:
-    """
-    awk -v name="${name}" '
-        /^>/ { print ">" name "." substr(\$1, 2) }
-        \$0 !~ />/ { print }
-    ' < "in.fasta" \
-    > "out.fasta"
-    """
-}
-
-
-preprocessedGenomes.set { preprocessedGenomes4UnscaffoldGenomes }
-
-
-/*
- */
-process unscaffoldGenomes {
 
     label "python3"
     label "small_task"
@@ -113,20 +72,26 @@ process unscaffoldGenomes {
     tag "${name}"
 
     input:
-    set val(name),
-        file("in.fasta") from preprocessedGenomes4UnscaffoldGenomes
+    set val(name), file("in.fasta") from genomes
 
     output:
-    set val(name),
-        file("${name}.fasta") into unscaffoldedGenomes
+    set val(name), file("${name}.fasta") into unscaffoldedGenomes
 
     script:
     """
+    awk -v name="${name}" '
+        /^>/ { print ">" name "." substr(\$1, 2) }
+        \$0 !~ />/ { print }
+    ' < "in.fasta" \
+    > "out.fasta"
+
     split_at_n_stretch.py \
       --nsize "${params.max_ns}" \
       --min-length "${params.min_contig}" \
       -o "${name}.fasta" \
-      in.fasta
+      out.fasta
+
+    rm out.fasta
     """
 }
 
@@ -145,7 +110,7 @@ process preprocessCompleteGenomes {
     tag "${name}"
 
     input:
-    set val(name), file("in.fasta") from completeGenomes4PreprocessGenomes
+    set val(name), file("in.fasta") from completeGenomes
 
     output:
     set val(name), file("${name}.fasta") into preprocessedCompleteGenomes
@@ -173,7 +138,6 @@ process combineGenomes {
 
     label "ppg"
     label "small_task"
-
     time "3h"
 
     input:
@@ -204,8 +168,6 @@ process combineGenomes {
 softMasked.into {
     softMasked4AlignScaffolds;
     softMasked4FindClusters;
-    softMasked4SelectScaffoldsToComponents;
-    softMasked4SquishAlignmentsFine;
 }
 
 
@@ -241,15 +203,12 @@ process alignScaffolds {
 }
 
 
-// fpa
-// url: https://github.com/natir/fpa
-//
-// Filter minimap output to only include long alignments.
-// Useful to reduce complexity of seqwish graph construction.
+// Filter out alignments that are only in repeat regions or are shorter than the min length.
 process filterAlignedScaffolds {
 
     label "ppg"
     label "small_task"
+    time "6h"
 
     publishDir "${params.outdir}/alignment1"
 
@@ -275,6 +234,7 @@ process filterAlignedScaffolds {
 }
 
 
+// Cluster the alignments to find components.
 process findClusters {
 
     label "ppg"
@@ -306,7 +266,7 @@ process findClusters {
       --prefix "component" \
       --outdir clusters \
       --unplaced "unplaced" \
-      --min-size 3 \
+      --min-size "${params.min_cluster_size}" \
       clusters.tsv \
       in.fasta
 
@@ -323,6 +283,7 @@ clusters
     .into {
         clusters4AlignComponents;
         clusters4SquishComponentAlignments;
+        clusters4RealignAgainstGraph;
     }
 
 
@@ -330,7 +291,7 @@ clusters
 // url: https://github.com/lh3/minimap2
 // doi: 10.1093/bioinformatics/bty191
 //
-// Does pairwise alignments of genomes.
+// Does pairwise alignments of genomes within components.
 process alignComponents {
 
     label "minimap2"
@@ -362,16 +323,12 @@ process alignComponents {
 }
 
 
-// fpa
-// url: https://github.com/natir/fpa
-//
-// Filter minimap output to only include long alignments.
-// Useful to reduce complexity of seqwish graph construction.
+// Filter out alignments that are only in repeat regions or are shorter than the min length.
 process filterAlignedComponents {
 
     label "ppg"
     label "small_task"
-    time "12h"
+    time "6h"
 
     publishDir "${params.outdir}/alignment2"
 
@@ -379,8 +336,8 @@ process filterAlignedComponents {
 
     input:
     set val(component),
-        file("aligned.paf") from alignedComponents
-    file "repeats.bed" from softMaskedBed
+        file("aligned.paf"),
+        file("repeats.bed") from alignedComponents.combine(softMaskedBed)
 
     output:
     set val(component),
@@ -410,10 +367,9 @@ process filterAlignedComponents {
 process squishAlignments {
 
     label "seqwish"
-    label "big_task"
+    label "biggish_task"
     time "1d"
 
-    publishDir "${params.outdir}/alignment2"
 
     tag "${component}"
 
@@ -432,8 +388,176 @@ process squishAlignments {
     seqwish \
       -s "in.fasta" \
       -p "alignments.paf" \
-      -g pan.gfa \
+      -g "${component}.gfa" \
       --threads "${task.cpus}"
+    """
+}
+
+
+squishedAlignments.set {
+    squishedAlignments4ODGI;
+}
+
+
+/*
+ * The squished graph has ~2x the sequence content and is too complex for vg.
+ * This removes simple bubbles, then bubbles shorter than 50bp.
+ * I do seem to get different results with this, rather than just using -B.
+ * `-B` is used to avoid tip-trimming.
+ */
+process popBubbles {
+
+    label "gfatools"
+    label "small_task"
+    time "1h"
+
+    tag "${component}"
+    input:
+    set val(component),
+        file("in.gfa") from squishedAlignments
+
+    output:
+    set val(component),
+        file("${component}.gfa") into poppedGraph
+
+    script:
+    """
+    gfatools asm -s -l 50 -B in.gfa > "${component}.gfa"
+    """
+}
+
+
+process simplifyGraph {
+
+    label "vg"
+    label "small_task"
+    time "2h"
+
+    tag "${component}"
+
+    input:
+    set val(component),
+        file("in.gfa") from poppedGraph
+
+    output:
+    set val(component),
+        file("${component}.vg") into simplifiedGraph
+
+    script:
+    """
+    vg view --vg --gfa-in in.gfa > in.vg
+    vg mod --unfold 1 in.vg > unfolded.vg
+    vg mod --dagify-step 1 unfolded.vg > dagified.vg
+    vg mod --until-normal 10 dagified.vg > "${component}.vg"
+
+    rm in.vg unfolded.vg dagified.vg
+    """
+}
+
+
+process combineGraph {
+
+    label "vg"
+    label "small_task"
+    time "2h"
+
+    input:
+    file "components/*.vg" from simplifiedGraph.map { c, g -> g }.collect()
+
+    output:
+    file "combined.vg" into combinedGraph
+
+    script:
+    """
+    # This is to avoid mutating and messing up checkpoints.
+    cp -rL components new_components
+
+    vg ids --join --compact --sort new_components/*.vg
+    cat new_components/*.vg > combined.vg
+    """
+}
+
+
+combinedGraph.into {
+    combinedGraph4RealignAgainstGraph;
+    combinedGraph4AugmentGraph;
+}
+
+
+process realignAgainstGraph {
+
+    label "graphaligner"
+    label "medium_task"
+    time "12h"
+
+    tag "${component}"
+
+    input:
+    set val(component),
+        file("contigs.fasta"),
+        file("combined.vg") from clusters4RealignAgainstGraph
+            .mix( unplacedScaffolds.map { f -> [f.simpleName, f] } )
+            .combine(combinedGraph)
+
+    output:
+    set val(component),
+        file("out.gam") into realignedAgainstGraph
+
+    script:
+    """
+    GraphAligner \
+      --graph combined.vg \
+      --reads contigs.fasta \
+      --alignments-out out.gam \
+      --threads "${task.cpus}" \
+      --seeds-mem-count -1 \
+      --seeds-mxm-length 20 \
+      --tangle-effort 100000
+    """
+}
+
+
+process augmentGraph {
+
+    label "vg"
+    label "medium_task"
+    time "12h"
+
+    publishDir "${params.outdir}/alignment2"
+
+    input:
+    file "in.vg" from combinedGraph4AugmentGraph
+    file "alignments/*.gam" from realignAgainstGraph
+        .map { c, g -> g }
+        .collect()
+
+    output:
+    file "pan.gfa"
+    file "components/*.gfa" into augmentedComponents mode flatten
+    file "pan.vg"
+
+    script:
+    """
+    cat alignments/*.gam > alignments.gam
+
+    vg augment \
+      --label-paths \
+      --progress \
+      --threads "${task.cpus}" \
+      in.vg \
+      alignments.gam \
+    > pan.vg
+
+    vg view --gfa --vg-in pan.vg > pan.gfa
+
+    vg explode pan.vg augmented
+
+    mkdir -p components
+    for f in augmented/*.vg
+    do
+      FNAME="\$(basename \${f%.*}}"
+      vg view --gfa --vg-in "\${f}" > "components/\${FNAME}.gfa"
+    done
     """
 }
 
@@ -453,7 +577,8 @@ process gfa2ODGI {
 
     input:
     set val(component),
-        file("pan.gfa") from squishedComponentAlignments
+        file("pan.gfa") from augmentedComponents
+            .map { f -> [f.simpleName, f] }
 
     output:
     set val(component),
@@ -470,6 +595,7 @@ odgiGraph.into {
     odgiGraph4VisualiseGraph;
     odgiGraph4GetBins;
 }
+
 
 /*
  * ODGI
