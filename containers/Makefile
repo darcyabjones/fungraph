@@ -264,7 +264,7 @@ docker/ppg: ppg.Dockerfile docker/base
 
 
 docker/fungraph: docker/fpa docker/minimap2 docker/minigraph docker/odgi
-docker/fungraph: docker/seqwish docker/vg docker/graphaligner
+docker/fungraph: docker/seqwish docker/vg docker/graphaligner docker/gfatools docker/ppg
 docker/fungraph: fungraph.Dockerfile docker/base docker/python3
 	docker build \
 	  --build-arg IMAGE="$(BASE_IMAGE)" \
