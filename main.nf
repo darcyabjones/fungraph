@@ -389,6 +389,7 @@ process squishAlignments {
       -s "in.fasta" \
       -p "alignments.paf" \
       -g "${component}.gfa" \
+      --repeat-max=1 \
       --threads "${task.cpus}"
     """
 }
@@ -422,7 +423,8 @@ process popBubbles {
 
     script:
     """
-    gfatools asm -s -l 50 -B in.gfa > "${component}.gfa"
+    cp -L in.gfa "${component}.gfa"
+    #gfatools asm -s in.gfa > "${component}.gfa"
     """
 }
 
@@ -431,7 +433,7 @@ process simplifyGraph {
 
     label "vg"
     label "small_task"
-    time "2h"
+    time "12h"
 
     tag "${component}"
 
@@ -446,11 +448,11 @@ process simplifyGraph {
     script:
     """
     vg view --vg --gfa-in in.gfa > in.vg
-    vg mod --unfold 1 in.vg > unfolded.vg
-    vg mod --dagify-step 1 unfolded.vg > dagified.vg
-    vg mod --until-normal 10 dagified.vg > "${component}.vg"
+    vg mod --drop-paths in.vg > "${component}.vg"
+    #vg mod --unchop in.vg > unchopped.vg
+    #vg mod --until-normal 10 unchopped.vg > "${component}.vg"
 
-    rm in.vg unfolded.vg dagified.vg
+    #rm in.vg unchopped.vg
     """
 }
 
@@ -466,6 +468,7 @@ process combineGraph {
 
     output:
     file "combined.vg" into combinedGraph
+    file "new_components/*.vg" into reIDdComponents mode flatten
 
     script:
     """
@@ -487,8 +490,8 @@ combinedGraph.into {
 process realignAgainstGraph {
 
     label "graphaligner"
-    label "medium_task"
-    time "12h"
+    label "big_task"
+    time "1d"
 
     tag "${component}"
 
@@ -510,9 +513,17 @@ process realignAgainstGraph {
       --reads contigs.fasta \
       --alignments-out out.gam \
       --threads "${task.cpus}" \
-      --seeds-mem-count -1 \
-      --seeds-mxm-length 20 \
-      --tangle-effort 100000
+      --seeds-minimizer-count 5 \
+      --seeds-minimizer-length 19 \
+      --seeds-minimizer-windowsize 30 \
+      --seeds-minimizer-chunksize 100 \
+      -b 5 \
+      -B 10 \
+      --tangle-effort 50000
+
+
+      #--seeds-mem-count 2000
+      #--seeds-mxm-length 13
     """
 }
 
@@ -520,14 +531,14 @@ process realignAgainstGraph {
 process augmentGraph {
 
     label "vg"
-    label "medium_task"
-    time "12h"
+    label "biggish_mem_task"
+    time "1d"
 
     publishDir "${params.outdir}/alignment2"
 
     input:
     file "in.vg" from combinedGraph4AugmentGraph
-    file "alignments/*.gam" from realignAgainstGraph
+    file "alignments/*.gam" from realignedAgainstGraph
         .map { c, g -> g }
         .collect()
 
@@ -539,11 +550,8 @@ process augmentGraph {
     script:
     """
     cat alignments/*.gam > alignments.gam
-
     vg augment \
       --label-paths \
-      --progress \
-      --threads "${task.cpus}" \
       in.vg \
       alignments.gam \
     > pan.vg
@@ -578,7 +586,6 @@ process gfa2ODGI {
     input:
     set val(component),
         file("pan.gfa") from augmentedComponents
-            .map { f -> [f.simpleName, f] }
 
     output:
     set val(component),
@@ -651,7 +658,7 @@ process getBins {
 
     output:
     set val(component),
-        file("${component}.json")
+        file("${component}.json") into odgiJSON
 
     script:
     """
@@ -661,5 +668,38 @@ process getBins {
         --bin-width 10000 \
         --path-delim "." \
     > "${component}.json"
+    """
+}
+
+odgiJSON.into {
+    odgiJSON4GetSequence;
+    odgiJSON4ExtractBins;
+}
+
+
+process getSequence {
+
+    label "posix"
+    label "small_task"
+    time "1h"
+
+    publishDir "${params.outdir}/alignment2"
+    tag "${component}"
+
+    input:
+    set val(component),
+        file("pan.json") from odgiJSON4GetSequence
+
+    output:
+    set val(component),
+        file("${component}.fasta") into componentSequences
+
+    script:
+    """
+    awk -v name="${component}" '
+      BEGIN {printf(">%s\n", name)}
+      /sequence/ { \$0=gensub(/.*sequence":"([^"]+)"}/, "\\\\1", "g", \$0); print}
+    ' pan.json \
+    > "${component}.fasta"
     """
 }
